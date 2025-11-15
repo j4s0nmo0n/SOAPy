@@ -1,7 +1,10 @@
+#!/usr/bin/env python3
 import argparse
 import logging
 import sys
 from base64 import b64decode, b64encode
+import base64
+from uuid import uuid4
 
 from impacket.examples import logger
 from impacket.examples.utils import parse_target
@@ -15,7 +18,8 @@ from impacket.ldap.ldaptypes import (
 )
 
 from src.adws import ADWSConnect, NTLMAuth
-from src.soap_templates import NAMESPACES
+from src.soap_templates import NAMESPACES, LDAP_CREATE_FOR_RESOURCEFACTORY,LDAP_CREATE_FOR_RESOURCEFACTORY, LDAP_DELETE_FOR_RESOURCE
+
 
 
 # https://github.com/fortra/impacket/blob/829239e334fee62ace0988a0cb5284233d8ec3c4/examples/rbcd.py#L180
@@ -50,39 +54,212 @@ def _create_allow_ace(sid: LDAP_SID):
     nace["Ace"] = acedata
     return nace
 
-def getAccountDN(
+def getAccountDN(target: str, username: str, ip: str, domain: str, auth: NTLMAuth):
+    """Get the distinguishedName of a user or computer in AD"""
+    get_account_query = f"(samAccountName={target})"
+    pull_client = ADWSConnect.pull_client(ip, domain, username, auth)
+
+    attributes: list = ["distinguishedname"]
+
+    pull_et = pull_client.pull(query=get_account_query, basedn=None, attributes=attributes)
+
+    distinguishedName_elem = None
+
+    # Cherche d'abord un user, sinon un computer
+    for tag in [".//addata:user", ".//addata:computer"]:
+        for item in pull_et.findall(tag, namespaces=NAMESPACES):
+            distinguishedName_elem = item.find(
+                ".//addata:distinguishedName/ad:value", namespaces=NAMESPACES
+            )
+            if distinguishedName_elem is not None:
+                break
+        if distinguishedName_elem is not None:
+            break
+
+    if distinguishedName_elem is None or distinguishedName_elem.text is None:
+        raise RuntimeError(f"Unable to locate DN for target '{target}'")
+
+    return distinguishedName_elem.text
+
+
+def delete_computer(
+    machine_name: str,
+    username: str,
+    ip: str,
+    domain: str,
+    auth: NTLMAuth
+):
+    """
+    Delete an AD computer object using ADWS WS-Transfer Delete
+    (same behavior as PowerShell Remove-ADComputer).
+    """
+
+    print(f"[*] Attempting to delete computer: {machine_name}")
+
+    # Normalize SAM
+    sam = machine_name if machine_name.endswith("$") else machine_name + "$"
+
+    # ---- Locate DN of the computer ----
+    print("[*] Locating computer in AD...")
+    try:
+        dn = getAccountDN(
+            target=sam,
+            username=username,
+            ip=ip,
+            domain=domain,
+            auth=auth
+        )
+    except Exception as e:
+        print(f"[-] Failed to locate machine {sam}: {e}")
+        return False
+
+    if not dn:
+        print(f"[-] Could not find DN for computer {sam}")
+        return False
+
+    print(f"[+] Found DN: {dn}")
+
+    # ---- Build WS-Transfer Delete request ----
+    msg_id = f"urn:uuid:{uuid4()}"
+
+    delete_payload = LDAP_DELETE_FOR_RESOURCE.format(
+    object_dn=dn,
+    fqdn=ip,
+    uuid=msg_id
+)
+
+    # ---- Send request ----
+    print("[*] Connecting to ADWS Resource endpoint to delete object...")
+
+    client = ADWSConnect(ip, domain, username, auth, "Resource")
+    client._nmf.send(delete_payload)
+    response = client._nmf.recv()
+
+    et = client._handle_str_to_xml(response)
+    if et is None:
+        print("[-] Empty or malformed DeleteResponse (but AD may still have removed the object).")
+        return False
+
+    print(f"[+] Computer {sam} successfully deleted.")
+    return True
+
+
+
+
+def encode_unicode_pwd(password: str) -> str:
+    # AD requires: password in quotes, UTF-16LE encoded, base64 encoded
+    quoted = f'"{password}"'
+    pwd_utf16 = quoted.encode('utf-16-le')
+    return base64.b64encode(pwd_utf16).decode()
+
+
+
+def add_computer(
     target: str,
+    machine_name: str,
+    ou_dn: str,
     username: str,
     ip: str,
     domain: str,
     auth: NTLMAuth,
-):
-    """Get an LDAP objects distinguishedName attribute to be used in write operations
-
-    Args:
-        target (str): target samAccountName
-        username (str): user to authenticate as
-        ip (str): the ip of the domain controller
-        domain (str): the domain name
-        auth (NTLMAuth): authentication method
+    remove: bool = False,
+    computer_pass: str = None,
+    spn_list: list = None,
+) -> bool:
+    """
+    Create a computer object in AD via ADWS ResourceFactory (WS-Transfer Create)
+    and optionally set unicodePwd and SPNs via Put operations.
     """
 
-    get_account_query = f"(samAccountName={target})"
-    pull_client = ADWSConnect.pull_client(ip, domain, username, auth)
+    if remove:
+        raise NotImplementedError("Removal logic is not implemented.")
 
-    attributes: list = [
-        "distinguishedname",
-    ]
+    # Normalize names
+    sam = machine_name if machine_name.endswith("$") else machine_name + "$"
+    cn = machine_name
 
-    pull_et = pull_client.pull(query=get_account_query, basedn=None, attributes=attributes)
+    # Determine container DN
+    if ou_dn:
+        container_dn = ou_dn
+    else:
+        domain_parts = [f"DC={p}" for p in domain.split(".") if p]
+        domain_dn = ",".join(domain_parts)
+        container_dn = f"CN=Computers,{domain_dn}"
 
-    for item in pull_et.findall(".//addata:user", namespaces=NAMESPACES):
-        distinguishedName_elem = item.find(
-            ".//addata:distinguishedName/ad:value", namespaces=NAMESPACES
+    logging.info(f"[+] Creating computer account {sam} in {container_dn} via ADWS ResourceFactory")
+
+    # ---- Build AttributeTypeAndValue XML blocks ----
+    # Si pas de mot de passe, on met un mot de passe par défaut "ChangeMe123!"
+    import secrets
+    import string
+
+    if computer_pass is None:
+        alphabet = string.ascii_letters + string.digits + "!@#$%^&*?"
+        computer_pass = ''.join(secrets.choice(alphabet) for _ in range(20))
+
+    print(f"[+] Using computer password: {computer_pass}")
+
+    encoded_pass = encode_unicode_pwd(computer_pass)
+
+    attrs = {
+        "addata:objectClass": ["computer"],
+        "ad:container-hierarchy-parent": [container_dn],
+        "ad:relativeDistinguishedName": [f"CN={cn}"],
+        "addata:sAMAccountName": [sam],
+        "addata:userAccountControl": ["4096"],  # WORKSTATION_TRUST_ACCOUNT
+        "addata:unicodePwd": [encoded_pass],
+    }
+
+    atav_xml = ""
+    for attr_type, values in attrs.items():
+        values_xml = ""
+        for v in values:
+            if attr_type == "addata:unicodePwd":
+                values_xml += f'<ad:value xsi:type="xsd:base64Binary">{v}</ad:value>'
+            else:
+                values_xml += f'<ad:value xsi:type="xsd:string">{v}</ad:value>'
+
+        atav_xml += (
+            "      <AttributeTypeAndValue>\n"
+            f"        <AttributeType>{attr_type}</AttributeType>\n"
+            f"        <AttributeValue>\n          {values_xml}\n        </AttributeValue>\n"
+            "      </AttributeTypeAndValue>\n"
         )
-    dn = distinguishedName_elem.text
 
-    return dn
+    # ---- Build SOAP Envelope ----
+    msg_id = f"urn:uuid:{uuid4()}"
+
+    addrequest_payload = LDAP_CREATE_FOR_RESOURCEFACTORY.format(
+    uuid=msg_id,
+    fqdn=ip,
+    atav_xml=atav_xml
+)
+
+    # ---- Send AddRequest ----
+    client = ADWSConnect(ip, domain, username, auth, "ResourceFactory")
+    client._nmf.send(addrequest_payload)
+    response = client._nmf.recv()
+
+    et = client._handle_str_to_xml(response)
+    if et is None:
+        raise RuntimeError("AddRequest response empty or malformed.")
+
+    logging.info("[+] AddRequest successful. Locating newly created object...")
+
+    dn = getAccountDN(target=sam, username=username, ip=ip, domain=domain, auth=auth)
+    if not dn:
+        raise RuntimeError("Failed to locate DN of the newly created computer.")
+
+    logging.info(f"[+] Created object DN: {dn}")
+
+
+    print(f"[+] Computer {sam} successfully created in {dn}")
+    return True
+
+
+
+
+
 
 
 def set_spn(
@@ -100,14 +277,14 @@ def set_spn(
     Args:
         target (str): target samAccountName
         value (str): value to append to the targets servicePrincipalName
-        username (str): user to authenticate as
+        username (str) : user to authenticate as
         ip (str): the ip of the domain controller
         auth (NTLMAuth): authentication method
         remove (bool): Whether to remove the value
     """
 
     dn = getAccountDN(target=target,username=username,ip=ip,domain=domain,auth=auth)
-    
+                                  
     put_client = ADWSConnect.put_client(ip, domain, username, auth)
     
     put_client.put(
@@ -302,7 +479,7 @@ def run_cli():
 ███████╗██║   ██║███████║██████╔╝ ╚████╔╝ 
 ╚════██║██║   ██║██╔══██║██╔═══╝   ╚██╔╝  
 ███████║╚██████╔╝██║  ██║██║        ██║   
-╚══════╝ ╚═════╝ ╚═╝  ╚═╝╚═╝        ╚═╝   
+╚══════╝ ╚═════╝ ╚═╝  ██╔╝╚═╝        ╚═╝   
 
 @_logangoins
 github.com/jlevere  
@@ -435,6 +612,34 @@ github.com/jlevere
         help="Operarion to remove an attribute value based off an operation",
     )
 
+    # -- ADD COMPUTER options
+    writing.add_argument(
+        "--addcomputer",
+        action="store",
+        metavar="MACHINE",
+        help="Create a new computer account in AD (machine name).",
+    )
+    writing.add_argument(
+        "--computer-pass",
+        action="store",
+        metavar="pass",
+        help="Password for the new computer account (optional).",
+    )
+    writing.add_argument(
+        "--ou",
+        action="store",
+        metavar="ou",
+        help="DN of the OU where to create the computer (optional).",
+    )
+
+    writing.add_argument(
+    "--delete-computer",
+    action="store",
+    metavar="MACHINE",
+    help="Delete an existing computer account from Active Directory",
+)
+
+
     if len(sys.argv) == 1:
         parser.print_help()
         sys.exit(1)
@@ -534,6 +739,44 @@ github.com/jlevere
             auth=auth,
             remove=options.remove
         )
+    elif options.addcomputer:
+        # Call the add_computer function you already implemented.
+        # Use --account as optional "target" parameter if provided (keeps same pattern as other ops)
+        if not username:
+            logging.critical('Please specify a username with the connection string')
+            raise SystemExit()
+
+        try:
+            add_computer(
+            target=options.account if options.account else None,
+            machine_name=options.addcomputer,
+            ou_dn=options.ou,
+            username=username,
+            ip=remoteName,
+            domain=domain,
+            auth=auth,
+            remove=options.remove,
+            computer_pass=options.computer_pass,   # <-- IMPORTANT
+        )
+
+            print(f"[+] Computer {options.addcomputer} {'removed' if options.remove else 'created'} successfully (requested).")
+        except NotImplementedError as e:
+            logging.error("Feature not implemented: %s", e)
+            raise SystemExit(2)
+        except Exception as e:
+            logging.exception("Error during add_computer operation: %s", e)
+            raise SystemExit(1)
+    
+    elif options.delete_computer:
+        delete_computer(
+            machine_name=options.delete_computer,
+            username=username,
+            ip=remoteName,
+            domain=domain,
+            auth=auth,
+        )
+        return
+
     else:
         if not ldap_query:
             logging.critical("Query can not be None")
