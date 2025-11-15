@@ -178,7 +178,7 @@ def add_computer(
     sam = machine_name if machine_name.endswith("$") else machine_name + "$"
     cn = machine_name
 
-    # Determine container DN
+    # Find DN container
     if ou_dn:
         container_dn = ou_dn
     else:
@@ -189,7 +189,7 @@ def add_computer(
     logging.info(f"[+] Creating computer account {sam} in {container_dn} via ADWS ResourceFactory")
 
     # ---- Build AttributeTypeAndValue XML blocks ----
-    # Si pas de mot de passe, on met un mot de passe par défaut "ChangeMe123!"
+    # If no password given by user, default password set to "ChangeMe123!"
     import secrets
     import string
 
