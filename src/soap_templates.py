@@ -110,32 +110,6 @@ LDAP_PUT_FSTRING: str = """<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-e
 from xml.sax.saxutils import escape as xml_escape
 
 LDAP_CREATE_FOR_RESOURCEFACTORY: str = """<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
-    xmlns:a="http://www.w3.org/2005/08/addressing"
-    xmlns:addata="http://schemas.microsoft.com/2008/1/ActiveDirectory/Data"
-    xmlns:ad="http://schemas.microsoft.com/2008/1/ActiveDirectory"
-    xmlns:xsd="http://www.w3.org/2001/XMLSchema"
-    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-    <s:Header>
-        <a:Action s:mustUnderstand="1">http://schemas.microsoft.com/2008/1/ActiveDirectory/ResourceFactory/Create</a:Action>
-        <ad:instance>ldap:389</ad:instance>
-        <a:MessageID>urn:uuid:{uuid}</a:MessageID>
-        <a:ReplyTo>
-            <a:Address>http://www.w3.org/2005/08/addressing/anonymous</a:Address>
-        </a:ReplyTo>
-        <a:To s:mustUnderstand="1">net.tcp://{fqdn}:9389/ActiveDirectoryWebServices/Windows/ResourceFactory</a:To>
-    </s:Header>
-    <s:Body>
-        <ad:Create>
-            <ad:Container>{container_dn}</ad:Container>
-            <ad:ObjectClass>{object_class}</ad:ObjectClass>
-            <ad:Attributes>
-                {attributes_xml}
-            </ad:Attributes>
-        </ad:Create>
-    </s:Body>
-</s:Envelope>"""
-
-LDAP_CREATE_FOR_RESOURCEFACTORY: str = """<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
     xmlns:wsa="http://www.w3.org/2005/08/addressing"
     xmlns:ad="http://schemas.microsoft.com/2008/1/ActiveDirectory"
     xmlns:addata="http://schemas.microsoft.com/2008/1/ActiveDirectory/Data"
