@@ -177,6 +177,7 @@ def add_computer(
     # Normalize names
     sam = machine_name if machine_name.endswith("$") else machine_name + "$"
     cn = machine_name
+    host = cn.rstrip("$")
 
     # Find DN container
     if ou_dn:
@@ -189,24 +190,36 @@ def add_computer(
     logging.info(f"[+] Creating computer account {sam} in {container_dn} via ADWS ResourceFactory")
 
     # ---- Build AttributeTypeAndValue XML blocks ----
-    # If no password given by user, default password set to "ChangeMe123!"
+    # If no password given by user, generate a secure 16-character password
     import secrets
     import string
 
     if computer_pass is None:
         alphabet = string.ascii_letters + string.digits + "!@#$%^&*?"
-        computer_pass = ''.join(secrets.choice(alphabet) for _ in range(20))
+        computer_pass = ''.join(secrets.choice(alphabet) for _ in range(16))
 
     print(f"[+] Using computer password: {computer_pass}")
 
     encoded_pass = encode_unicode_pwd(computer_pass)
+
+    # Default SPNs like Powermad / Impacket
+    default_spns = [
+        f"HOST/{host}",
+        f"HOST/{host}.{domain}",
+        f"RestrictedKrbHost/{host}",
+        f"RestrictedKrbHost/{host}.{domain}",
+    ]
+
+    spns = spn_list if spn_list else default_spns
 
     attrs = {
         "addata:objectClass": ["computer"],
         "ad:container-hierarchy-parent": [container_dn],
         "ad:relativeDistinguishedName": [f"CN={cn}"],
         "addata:sAMAccountName": [sam],
-        "addata:userAccountControl": ["4096"],  # WORKSTATION_TRUST_ACCOUNT
+        "addata:userAccountControl": ["4096"],  # WORKSTATION_TRUST_ACCOUNT (0x1000)
+        "addata:dnsHostName": [f"{host}.{domain}"],
+        "addata:servicePrincipalName": spns,
         "addata:unicodePwd": [encoded_pass],
     }
 
@@ -215,8 +228,10 @@ def add_computer(
         values_xml = ""
         for v in values:
             if attr_type == "addata:unicodePwd":
+                # unicodePwd must be sent as base64Binary in ADWS SOAP
                 values_xml += f'<ad:value xsi:type="xsd:base64Binary">{v}</ad:value>'
             else:
+                # SPNs and dnsHostName are strings; multiple SPNs create multiple <ad:value> entries
                 values_xml += f'<ad:value xsi:type="xsd:string">{v}</ad:value>'
 
         atav_xml += (
@@ -230,10 +245,10 @@ def add_computer(
     msg_id = f"urn:uuid:{uuid4()}"
 
     addrequest_payload = LDAP_CREATE_FOR_RESOURCEFACTORY.format(
-    uuid=msg_id,
-    fqdn=ip,
-    atav_xml=atav_xml
-)
+        uuid=msg_id,
+        fqdn=ip,
+        atav_xml=atav_xml
+    )
 
     # ---- Send AddRequest ----
     client = ADWSConnect(ip, domain, username, auth, "ResourceFactory")
@@ -251,7 +266,6 @@ def add_computer(
         raise RuntimeError("Failed to locate DN of the newly created computer.")
 
     logging.info(f"[+] Created object DN: {dn}")
-
 
     print(f"[+] Computer {sam} successfully created in {dn}")
     return True
