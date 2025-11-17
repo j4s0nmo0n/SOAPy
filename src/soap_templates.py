@@ -134,11 +134,14 @@ LDAP_CREATE_FOR_RESOURCEFACTORY: str = """<s:Envelope xmlns:s="http://www.w3.org
     <AddRequest Dialect="http://schemas.microsoft.com/2008/1/ActiveDirectory/Dialect/XPath-Level-1"
                 xmlns="http://schemas.microsoft.com/2006/11/IdentityManagement/DirectoryAccess">
 {atav_xml}
+<ad:controls>
+                <ad:control type="1.2.840.113556.1.4.801" criticality="true">
+                <ad:controlValue xsi:type="xsd:base64Binary">MIQAAAADAgEH</ad:controlValue>
+            </ad:control>
     </AddRequest>
   </s:Body>
 </s:Envelope>
 """
-
 
 
 LDAP_DELETE_FOR_RESOURCE: str = """<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
