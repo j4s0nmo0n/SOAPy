@@ -4,6 +4,8 @@ import logging
 import sys
 from base64 import b64decode, b64encode
 import base64
+import string
+import random
 from uuid import uuid4
 
 from impacket.examples import logger
@@ -153,7 +155,6 @@ def encode_unicode_pwd(password: str) -> str:
     return base64.b64encode(pwd_utf16).decode()
 
 
-
 def add_computer(
     target: str,
     machine_name: str,
@@ -173,6 +174,16 @@ def add_computer(
 
     if remove:
         raise NotImplementedError("Removal logic is not implemented.")
+    
+    # If no machine_name given by user, generate a secure name
+    import secrets
+    import string
+
+    if machine_name is None:
+        machine_name = 'DESKTOP-' + (''.join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(8)))
+
+    print(f"[+] Using machine ame: {machine_name}")
+
 
     # Normalize names
     sam = machine_name if machine_name.endswith("$") else machine_name + "$"
@@ -328,7 +339,6 @@ def set_asrep(
         target (str): target samAccountName
         username (str): user to authenticate as
         ip (str): the ip of the domain controller
-        auth (NTLMAuth): authentication method
         remove (bool): Whether to remove the value
     """
     
@@ -581,7 +591,7 @@ def run_cli():
 ███████╗ ██████╗  █████╗ ██████╗ ██╗   ██╗
 ██╔════╝██╔═══██╗██╔══██╗██╔══██╗╚██╗ ██╔╝
 ███████╗██║   ██║███████║██████╔╝ ╚████╔╝ 
-╚════██║██║   ██║██╔══██║██╔═══╝   ╚██╔╝  
+╚════██║██║   ██║██╔╔██║██╔═══╝   ╚██╔╝  
 ███████║╚██████╔╝██║  ██║██║        ██║   
 ╚══════╝ ╚═════╝ ╚═╝  ██╔╝╚═╝        ╚═╝   
 
@@ -653,12 +663,12 @@ github.com/jlevere
     )
     enum.add_argument(
         "--admins", 
-        action="store_true", 
+        action="store_true",
         help="Enumerate high privilege accounts"
     )
     enum.add_argument(
         "--rbcds", 
-        action="store_true", 
+        action="store_true",
         help="Enumerate accounts with msDs-AllowedToActOnBehalfOfOtherIdentity set"
     )
     enum.add_argument(
@@ -717,11 +727,16 @@ github.com/jlevere
     )
 
     # -- ADD COMPUTER options
+    # Make --addcomputer accept an optional MACHINE argument.
+    # If the user provides the flag without a value, argparse will set it to ''
+    # and we will treat that as "generate a machine name".
     writing.add_argument(
         "--addcomputer",
+        nargs='?',
+        const='',
         action="store",
         metavar="MACHINE",
-        help="Create a new computer account in AD (machine name).",
+        help="Create a new computer account in AD (machine name). If omitted, a random name will be generated.",
     )
     writing.add_argument(
         "--computer-pass",
@@ -851,17 +866,20 @@ github.com/jlevere
             auth=auth,
             remove=options.remove
         )
-    elif options.addcomputer:
-        # Call the add_computer function you already implemented.
-        # Use --account as optional "target" parameter if provided (keeps same pattern as other ops)
+    elif getattr(options, "addcomputer", None) is not None:
+        # options.addcomputer is set when the flag is present.
+        # If the user passed the flag without a name, argparse sets it to '',
+        # in which case we want add_computer to generate a name (pass machine_name=None).
         if not username:
             logging.critical('Please specify a username with the connection string')
             raise SystemExit()
 
+        machine_name = None if options.addcomputer == "" else options.addcomputer
+
         try:
             add_computer(
             target=options.account if options.account else None,
-            machine_name=options.addcomputer,
+            machine_name=machine_name,
             ou_dn=options.ou,
             username=username,
             ip=remoteName,
@@ -871,7 +889,8 @@ github.com/jlevere
             computer_pass=options.computer_pass,   # <-- IMPORTANT
         )
 
-            print(f"[+] Computer {options.addcomputer} {'removed' if options.remove else 'created'} successfully (requested).")
+            display_name = machine_name if machine_name else "(generated)"
+            print(f"[+] Computer {display_name} {'removed' if options.remove else 'created'} successfully (requested).")
         except NotImplementedError as e:
             logging.error("Feature not implemented: %s", e)
             raise SystemExit(2)
