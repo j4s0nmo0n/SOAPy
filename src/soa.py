@@ -486,6 +486,96 @@ def set_rbcd(
     print(f"[+] {account} {'can not' if remove else 'can'} delegate to {target}")
 
 
+def disable_machine_account(
+    machine_name: str,
+    username: str,
+    ip: str,
+    domain: str,
+    auth: NTLMAuth
+) -> bool:
+    """
+    Disable a computer account (set the ACCOUNTDISABLE flag in userAccountControl)
+    using ADWS WS-Transfer Put (replace userAccountControl).
+    Behavior mirrors Powermad's Disable-MachineAccount: the creator of the account
+    typically has write permissions to modify attributes like AccountDisabled/userAccountControl.
+    """
+    print(f"[*] Attempting to disable computer: {machine_name}")
+
+    # Normalize SAM
+    sam = machine_name if machine_name.endswith("$") else machine_name + "$"
+
+    # ---- Locate current userAccountControl and DN ----
+    get_accounts_queries = f"(sAMAccountName={sam})"
+    pull_client = ADWSConnect.pull_client(ip, domain, username, auth)
+
+    attributes: list = [
+        "userAccountControl",
+        "distinguishedName",
+    ]
+
+    try:
+        pull_et = pull_client.pull(query=get_accounts_queries, basedn=None, attributes=attributes)
+    except Exception as e:
+        print(f"[-] Failed LDAP pull for {sam}: {e}")
+        return False
+
+    uac_elem = None
+    distinguishedName_elem = None
+
+    # Try computer first, then user
+    for tag in [".//addata:computer", ".//addata:user"]:
+        for item in pull_et.findall(tag, namespaces=NAMESPACES):
+            if uac_elem is None:
+                uac_elem = item.find(".//addata:userAccountControl/ad:value", namespaces=NAMESPACES)
+            if distinguishedName_elem is None:
+                distinguishedName_elem = item.find(".//addata:distinguishedName/ad:value", namespaces=NAMESPACES)
+            if uac_elem is not None and distinguishedName_elem is not None:
+                break
+        if uac_elem is not None and distinguishedName_elem is not None:
+            break
+
+    if distinguishedName_elem is None or distinguishedName_elem.text is None:
+        print(f"[-] Unable to locate DN for {sam}")
+        return False
+
+    dn = distinguishedName_elem.text
+
+    if uac_elem is None or uac_elem.text is None:
+        print(f"[-] Unable to locate userAccountControl for {sam}")
+        return False
+
+    try:
+        current_uac = int(uac_elem.text)
+    except Exception as e:
+        print(f"[-] Failed to parse userAccountControl value: {e}")
+        return False
+
+    ACCOUNTDISABLE_FLAG = 0x2
+
+    if (current_uac & ACCOUNTDISABLE_FLAG) != 0:
+        print(f"[-] Computer {sam} is already disabled (userAccountControl={current_uac}).")
+        return True
+
+    new_uac = current_uac | ACCOUNTDISABLE_FLAG
+
+    # ---- Perform Put (replace userAccountControl) ----
+    try:
+        put_client = ADWSConnect.put_client(ip, domain, username, auth)
+        put_client.put(
+            object_ref=dn,
+            operation="replace",
+            attribute="addata:userAccountControl",
+            data_type="string",
+            value=new_uac,
+        )
+    except Exception as e:
+        print(f"[-] Failed to write new userAccountControl for {sam}: {e}")
+        return False
+
+    print(f"[+] Computer {sam} successfully disabled (userAccountControl set to {new_uac}).")
+    return True
+
+
 def run_cli():
     print("""
 ███████╗ ██████╗  █████╗ ██████╗ ██╗   ██╗
@@ -538,7 +628,7 @@ github.com/jlevere
     )
     enum.add_argument(
         "--groups", 
-        action="store_true", 
+        action="store_true",
         help="Enumerate group objects"
     )
     enum.add_argument(
@@ -650,8 +740,16 @@ github.com/jlevere
     "--delete-computer",
     action="store",
     metavar="MACHINE",
-    help="Delete an existing computer account from Active Directory",
+    help="Delete an existing computer account from Active Directory (requires admin privileges!)",
 )
+
+    # -- DISABLE COMPUTER option (equivalent to Powermad's Disable-MachineAccount)
+    writing.add_argument(
+        "--disable-account",
+        action="store",
+        metavar="MACHINE",
+        help="Disable a computer account (set AccountDisabled) in Active Directory",
+    )
 
 
     if len(sys.argv) == 1:
@@ -781,6 +879,25 @@ github.com/jlevere
             logging.exception("Error during add_computer operation: %s", e)
             raise SystemExit(1)
     
+    elif options.disable_account:
+        if not username:
+            logging.critical('Please specify a username with the connection string')
+            raise SystemExit()
+        try:
+            success = disable_machine_account(
+                machine_name=options.disable_account,
+                username=username,
+                ip=remoteName,
+                domain=domain,
+                auth=auth,
+            )
+            if not success:
+                raise SystemExit(1)
+            print(f"[+] Computer {options.disable_account} disabled successfully (requested).")
+        except Exception as e:
+            logging.exception("Error during disable_account operation: %s", e)
+            raise SystemExit(1)
+
     elif options.delete_computer:
         delete_computer(
             machine_name=options.delete_computer,
