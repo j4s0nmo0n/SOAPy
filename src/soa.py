@@ -1,26 +1,4 @@
 #!/usr/bin/env python3
-"""
-soa.py
-
-Main CLI entrypoint for SOAPy ADWS operations, extended to support AD-integrated DNS
-management (add/modify/remove/tombstone/resurrect) via ADWS in addition to computer
-management functions (create/delete/disable/spn/asrep/rbcd) already present.
-
-This file consolidates the functionality from ad_computer_management.py and wires in
-the ADWS-based DNS helpers implemented in src/ad_dns_manager_adws.py.
-
-Usage: same as before, with new DNS options:
-  --dns-add FQDN            Add an A record (requires --dns-ip)
-  --dns-modify FQDN         Replace A record (requires --dns-ip)
-  --dns-remove FQDN         Remove A record (requires --dns-ip unless --ldapdelete)
-  --dns-tombstone FQDN      Tombstone a dnsNode (replace with TS record + set dNSTombstoned=true)
-  --dns-resurrect FQDN      Resurrect a tombstoned dnsNode (replace TS and set dNSTombstoned=false)
-  --dns-ip IP               IP used for add/modify/remove operations
-  --ldapdelete              When used with --dns-remove, delete the dnsNode object instead of removing a record
-  --allow-multiple          Allow multiple A records when adding
-  --ttl N                  TTL for A records (default 180)
-  --tcp                     Use DNS over TCP for serial lookup
-"""
 
 import argparse
 import logging
@@ -46,7 +24,7 @@ from impacket.ldap.ldaptypes import (
 from src.adws import ADWSConnect, NTLMAuth
 from src.soap_templates import NAMESPACES, LDAP_CREATE_FOR_RESOURCEFACTORY, LDAP_DELETE_FOR_RESOURCE, LDAP_PUT_FSTRING
 
-# DNS ADWS helpers (module you added)
+# DNS ADWS helpers
 from src.ad_dns_manager_adws import (
     add_dns_record_adws,
     modify_dns_record_adws,
@@ -54,10 +32,6 @@ from src.ad_dns_manager_adws import (
     tombstone_dns_record_adws,
     resurrect_dns_record_adws,
 )
-
-# ---------------------------------------------------------------------------
-# Utility helpers (copied / adapted from ad_computer_management.py)
-# ---------------------------------------------------------------------------
 
 # https://github.com/fortra/impacket/blob/829239e334fee62ace0988a0cb5284233d8ec3c4/examples/rbcd.py#L180
 def _create_empty_sd():
@@ -306,7 +280,7 @@ def add_computer(
         domain_dn = ",".join(domain_parts)
         container_dn = f"CN=Computers,{domain_dn}"
 
-    logging.info(f"[+] Creating computer account {sam} in {container_dn} via ADWS ResourceFactory")
+    logging.info(f"Creating computer account {sam} in {container_dn} via ADWS ResourceFactory")
 
     # ---- Build AttributeTypeAndValue XML blocks ----
     # If no password given by user, generate a secure 16-character password
@@ -377,13 +351,13 @@ def add_computer(
     if et is None:
         raise RuntimeError("AddRequest response empty or malformed.")
 
-    logging.info("[+] AddRequest successful. Locating newly created object...")
+    logging.info("AddRequest successful. Locating newly created object...")
 
     dn = getAccountDN(target=sam, username=username, ip=ip, domain=domain, auth=auth)
     if not dn:
         raise RuntimeError("Failed to locate DN of the newly created computer.")
 
-    logging.info(f"[+] Created object DN: {dn}")
+    logging.info(f"Created object DN: {dn}")
 
     print(f"[+] Computer {sam} successfully created in {dn}")
     return True
@@ -948,8 +922,8 @@ github.com/jlevere
         # Enumeration / Pull operations (default)
         # -----------------------
         else:
-            if not ldap_query:
-                logging.critical("Query can not be None")
+            if ldap_query is None or all(q is None for q in ldap_query):
+                logging.critical("Query cannot be None")
                 raise SystemExit()
 
             client = ADWSConnect.pull_client(
