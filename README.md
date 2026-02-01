@@ -15,11 +15,11 @@ The blog detailing the original research largely from an engineering perspective
 ███████╗██║   ██║███████║██████╔╝ ╚████╔╝ 
 ╚════██║██║   ██║██╔══██║██╔═══╝   ╚██╔╝  
 ███████║╚██████╔╝██║  ██║██║        ██║   
-╚══════╝ ╚═════╝ ╚═╝  ╚═╝╚═╝        ╚═╝   
+╚══════╝ ╚═════╝ ╚═╝  ╚═╝╚═╝        ╚═╝  
 
 @_logangoins
-github.com/jlevere  
-          
+github.com/jlevere
+
 usage: soapy [-h] [--debug] [--ts] [-H nthash] [--users] [--computers]
              [--groups] [--constrained] [--unconstrained] [--spns]
              [--asreproastable] [--admins] [--rbcds] [-q query]
@@ -27,10 +27,13 @@ usage: soapy [-h] [--debug] [--ts] [-H nthash] [--users] [--computers]
              [--spn value] [--asrep] [--account account] [--remove]
              [--addcomputer [MACHINE]] [--computer-pass pass] [--ou ou]
              [--delete-computer MACHINE] [--disable-account MACHINE]
-             [--dns-add FQDN] [--dns-modify FQDN] [--dns-remove FQDN]
-             [--dns-tombstone FQDN] [--dns-resurrect FQDN] [--dns-ip IP]
-             [--ldapdelete] [--allow-multiple] [--ttl TTL] [--tcp]
-             connection
+             [--shadow-creds ACTION] [--shadow-target TARGET] [--device-id ID]
+             [--cert-filename NAME] [--cert-export TYPE]
+             [--cert-password PASS] [--shadow-creds-help] [--dns-add FQDN]
+             [--dns-modify FQDN] [--dns-remove FQDN] [--dns-tombstone FQDN]
+             [--dns-resurrect FQDN] [--dns-ip IP] [--ldapdelete]
+             [--allow-multiple] [--ttl TTL] [--tcp]
+             [connection]
 
 Perform AD reconnaissance and post-exploitation through ADWS from Linux
 
@@ -71,27 +74,36 @@ Writing:
   --account account     Account to perform operations on
   --remove              Remove attribute value based on operation
   --addcomputer [MACHINE]
-                        Create a computer account in AD (optional MACHINE
-                        name)
-  --computer-pass pass  Password for the new computer account (optional).
-  --ou ou               DN of the OU where to create the computer (optional).
+                        Create a computer account in AD
+  --computer-pass pass  Password for the new computer account
+  --ou ou               DN of the OU where to create the computer
   --delete-computer MACHINE
                         Delete an existing computer account
   --disable-account MACHINE
-                        Disable a computer account (set AccountDisabled)
+                        Disable a computer account
   --dns-add FQDN        Add A record (FQDN). Requires --dns-ip
   --dns-modify FQDN     Modify/replace A record (FQDN). Requires --dns-ip
   --dns-remove FQDN     Remove A record (FQDN). Requires --dns-ip unless
                         --ldapdelete
-  --dns-tombstone FQDN  Tombstone a dnsNode (replace with TS record + set
-                        dNSTombstoned=true)
+  --dns-tombstone FQDN  Tombstone a dnsNode
   --dns-resurrect FQDN  Resurrect a tombstoned dnsNode
   --dns-ip IP           IP used with dns add/modify/remove
-  --ldapdelete          Use delete on dnsNode object (when used with --dns-
-                        remove)
+  --ldapdelete          Use delete on dnsNode object
   --allow-multiple      Allow multiple A records when adding
   --ttl TTL             TTL for new A record (default 180)
   --tcp                 Use DNS over TCP when fetching SOA serial
+
+Shadow Credentials (msDS-KeyCredentialLink):
+  --shadow-creds ACTION
+                        Shadow Credentials action: list, add, remove, clear,
+                        info
+  --shadow-target TARGET
+                        Target account for Shadow Credentials operation
+  --device-id ID        Device ID for remove/info actions
+  --cert-filename NAME  Filename for certificate export (add action)
+  --cert-export TYPE    Export type: PEM or PFX (default: PFX)
+  --cert-password PASS  Password for PFX file (random if not set)
+  --shadow-creds-help   Display detailed Shadow Credentials help and examples
 
 ```
 
