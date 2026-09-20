@@ -1643,12 +1643,10 @@ class ADWSConnect:
     def accounts_cap_client(
         cls, ip: str, domain: str, username: str, auth: ADWSAuthType
     ) -> Self:
-        # return cls(ip, domain, username, auth, "AccountManagement")
-        raise NotImplementedError()
+        return cls(ip, domain, username, auth, "AccountManagement")
 
     @classmethod
     def topology_cap_client(
         cls, ip: str, domain: str, username: str, auth: ADWSAuthType
     ) -> Self:
-        # return cls(ip, domain, username, auth, "TopologyManagement")
-        raise NotImplementedError()
+        return cls(ip, domain, username, auth, "TopologyManagement")

@@ -23,6 +23,7 @@ from impacket.ldap.ldaptypes import (
 
 from src.adws import ADWSAuthType, ADWSConnect, KerberosAuth, NTLMAuth
 from src.soap_templates import NAMESPACES, LDAP_CREATE_FOR_RESOURCEFACTORY, LDAP_DELETE_FOR_RESOURCE, LDAP_PUT_FSTRING
+from src import adcap
 
 # DNS ADWS helpers
 from src.ad_dns_manager_adws import (
@@ -717,6 +718,37 @@ github.com/jlevere
     writing.add_argument("--ttl", type=int, default=180, help="TTL for new A record (default 180)")
     writing.add_argument("--tcp", action="store_true", help="Use DNS over TCP when fetching SOA serial")
 
+    # MS-ADCAP options
+    adcap_grp = parser.add_argument_group('MS-ADCAP')
+    adcap_grp.add_argument(
+        "--translate-name",
+        dest="translate_name",
+        action="store_true",
+        help="Translate name(s) via MS-ADCAP AccountManagement/TranslateName",
+    )
+    adcap_grp.add_argument(
+        "--name",
+        dest="adcap_names",
+        action="append",
+        metavar="DN",
+        default=[],
+        help="Name to translate (repeatable, use with --translate-name)",
+    )
+    adcap_grp.add_argument(
+        "--desired",
+        dest="adcap_desired",
+        action="store",
+        metavar="FORMAT",
+        default="CanonicalName",
+        help="Desired output format for --translate-name (default: CanonicalName)",
+    )
+    adcap_grp.add_argument(
+        "--get-forest",
+        dest="get_forest",
+        action="store_true",
+        help="Retrieve forest topology via MS-ADCAP TopologyManagement/GetADForest",
+    )
+
     if len(sys.argv) == 1:
         parser.print_help()
         sys.exit(1)
@@ -1039,6 +1071,50 @@ github.com/jlevere
                 auth=auth,
                 tcp=options.tcp,
             )
+
+        # ADCAP TranslateName
+        elif options.translate_name:
+            if not options.adcap_names:
+                logging.critical("--translate-name requires at least one --name <DN>")
+                raise SystemExit(1)
+            cap_client = ADWSConnect.accounts_cap_client(
+                ip=remoteName,
+                domain=domain,
+                username=username,
+                auth=auth,
+            )
+            results = adcap.translate_name(
+                cap_client,
+                options.adcap_names,
+                format_desired=options.adcap_desired,
+            )
+            print(f"{'Name':<60}  Result")
+            print("-" * 70)
+            for name_in, (name_out, code) in zip(options.adcap_names, results):
+                translated = name_out if name_out is not None else "(nil)"
+                print(f"{translated:<60}  {code}")
+
+        # ADCAP GetADForest
+        elif options.get_forest:
+            cap_client = ADWSConnect.topology_cap_client(
+                ip=remoteName,
+                domain=domain,
+                username=username,
+                auth=auth,
+            )
+            forest = adcap.get_ad_forest(cap_client)
+            col_width = 28
+            for key, val in forest.items():
+                label = key.replace("_", " ").title()
+                if isinstance(val, list):
+                    if val:
+                        print(f"{label + ':':<{col_width}} {val[0]}")
+                        for item in val[1:]:
+                            print(f"{'':<{col_width}} {item}")
+                    else:
+                        print(f"{label + ':':<{col_width}} (none)")
+                else:
+                    print(f"{label + ':':<{col_width}} {val}")
 
         # Enumeration / Pull operations (default)
         else:
