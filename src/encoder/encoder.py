@@ -1,6 +1,7 @@
 from io import BytesIO
 
 from .records import Net7BitInteger, record, dump_records, print_records
+from .records.constants import DICTIONARY
 from .xml_parser import XMLParser
 
 
@@ -108,11 +109,17 @@ class Encoder:
 
             # if there is something in the inband dict
             if size3 != 0:
-                # cut off just the dict part and try to extract it
+                # cut off just the dict part and extract it
                 string_table = self._extract_stringtable_inband(
                     data[len_len3 : len_len3 + size3]
                 )
-                print(string_table)
+                # Inject the inband dict entries into DICTIONARY so the record
+                # parser resolves tag/namespace/attribute IDs to their real
+                # values instead of leaving them as [[VALUE_0xNN]] placeholders.
+                # Without this, MS-ADCAP responses (AccountManagement,
+                # TopologyManagement) are parseable only by ID lookups.
+                for k, v in string_table.items():
+                    DICTIONARY[k] = v.decode("utf-8") if isinstance(v, bytes) else v
 
             # then index data to be the start of the actual xml blob
             data = data[len_len3 + size3 :]
