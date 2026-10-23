@@ -11,6 +11,7 @@ from enum import IntFlag
 from typing import Callable, Self, Type
 from uuid import UUID, uuid4
 from xml.etree import ElementTree
+from xml.sax.saxutils import escape as xml_escape
 
 from impacket.ldap.ldaptypes import (
     ACCESS_ALLOWED_ACE,
@@ -1350,7 +1351,7 @@ class ADWSConnect:
             "operation": operation,
             "attribute": attribute,
             "data_type": data_type,
-            "value": value,
+            "value": xml_escape(str(value)),
         }
 
         put_msg = LDAP_PUT_FSTRING.format(**put_vars)

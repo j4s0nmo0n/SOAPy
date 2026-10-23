@@ -300,6 +300,41 @@ def add_computer(
     return True
 
 
+def set_generic_attribute(
+    target_dn: str,
+    attribute: str,
+    values: list[str],
+    operation: str,
+    username: str,
+    ip: str,
+    domain: str,
+    auth: ADWSAuthType,
+) -> None:
+    """Write an arbitrary attribute on any AD object via ADWS Resource Put."""
+    if ":" not in attribute:
+        attribute = f"addata:{attribute}"
+
+    put_client = ADWSConnect.put_client(ip, domain, username, auth)
+
+    # ADWS PUT supports one Change block per request; iterate for multi-value.
+    # For "replace": first call replaces (clears + sets), subsequent calls add.
+    for i, val in enumerate(values):
+        op = operation if (operation != "replace" or i == 0) else "add"
+        ok = put_client.put(
+            object_ref=target_dn,
+            operation=op,
+            attribute=attribute,
+            data_type="string",
+            value=val,
+        )
+        if not ok:
+            logging.error("[-] ADWS PUT returned a non-empty body for value %r — possible error", val)
+            return
+
+    short_attr = attribute.split(":")[-1]
+    print(f"[+] {short_attr} écrit avec succès sur {target_dn} (op={operation})")
+
+
 def set_spn(
     target: str,
     value: str,
@@ -718,6 +753,18 @@ github.com/jlevere
     writing.add_argument("--ttl", type=int, default=180, help="TTL for new A record (default 180)")
     writing.add_argument("--tcp", action="store_true", help="Use DNS over TCP when fetching SOA serial")
 
+    # Generic attribute write
+    writing.add_argument("--set-attribute", action="store_true",
+        help="Écrit un attribut arbitraire sur un objet AD via ADWS Resource Put")
+    writing.add_argument("--target-dn", metavar="TARGET_DN",
+        help="DN complet de l'objet à modifier (utiliser avec --set-attribute)")
+    writing.add_argument("--attribute", metavar="ATTR",
+        help="Nom de l'attribut LDAP à modifier (préfixe addata: ajouté automatiquement)")
+    writing.add_argument("--attr-value", metavar="VALUE", action="append",
+        help="Valeur à écrire (répétable pour multi-valued)")
+    writing.add_argument("--attr-op", choices=["add", "replace", "delete"],
+        default="replace", help="Opération LDAP (défaut : replace)")
+
     # MS-ADCAP options
     adcap_grp = parser.add_argument_group('MS-ADCAP')
     adcap_grp.add_argument(
@@ -928,6 +975,22 @@ github.com/jlevere
                 )
 
         # RBCD
+        # Generic attribute write
+        elif getattr(options, "set_attribute", False):
+            if not options.target_dn or not options.attribute or not options.attr_value:
+                logging.critical("--set-attribute requires --target-dn, --attribute and --attr-value")
+                raise SystemExit(1)
+            set_generic_attribute(
+                target_dn=options.target_dn,
+                attribute=options.attribute,
+                values=options.attr_value,
+                operation=options.attr_op,
+                ip=remoteName,
+                domain=domain,
+                username=username,
+                auth=auth,
+            )
+
         elif options.rbcd is not None:
             handle_rbcd(
                 rbcd_action_or_source=options.rbcd,
