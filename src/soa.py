@@ -1263,34 +1263,63 @@ github.com/jlevere
                 else:
                     print(f"{label + ':':<{col_width}} {val}")
 
-        # WS-Trust certificate enrollment (MS-XCEP + MS-WSTEP)
-        elif options.list_policies_ws:
-            from src.cert_enroll_xcep import DEFAULT_USER_AGENT, run_list_policies
+        # WS-Trust certificate enrollment (MS-XCEP + MS-WSTEP).
+        # Reuse the creds already extracted from the connection string
+        # (domain/user:password@host) or -nt to do an in-process AS-REQ via
+        # impacket and expose the TGT through a tempdir ccache that
+        # requests-gssapi can read. Without inline creds, fall back to the
+        # system ccache (user ran kinit beforehand or set KRB5CCNAME).
+        elif options.list_policies_ws or options.enroll_ws:
+            from contextlib import nullcontext
+            from src.kerb_tgt import inline_tgt_ccache
 
-            run_list_policies(
-                remote_name=remoteName,
-                cep_url=options.cep_url,
-                ca_name=options.wstep_ca,
-                insecure_ssl=options.insecure_ssl,
-                user_agent=options.user_agent or DEFAULT_USER_AGENT,
-            )
+            has_inline_creds = bool(password) or bool(options.nthash)
+            if has_inline_creds:
+                lm_hash, nt_hash = "", ""
+                if options.nthash:
+                    parts = options.nthash.split(":", 1)
+                    if len(parts) == 2:
+                        lm_hash, nt_hash = parts
+                    else:
+                        nt_hash = parts[0]
+                auth_ctx = inline_tgt_ccache(
+                    username=username,
+                    domain=domain,
+                    password=password or None,
+                    nt_hash=nt_hash or None,
+                    lm_hash=lm_hash or None,
+                    kdc_ip=remoteName,
+                )
+            else:
+                auth_ctx = nullcontext()
 
-        elif options.enroll_ws:
-            from src.cert_enroll_wstep import run_enroll
-            from src.cert_enroll_xcep import DEFAULT_USER_AGENT
+            with auth_ctx:
+                if options.list_policies_ws:
+                    from src.cert_enroll_xcep import DEFAULT_USER_AGENT, run_list_policies
 
-            run_enroll(
-                remote_name=remoteName,
-                ces_url=options.ces_url,
-                cep_url=options.cep_url,
-                ca_name=options.wstep_ca,
-                template_name=options.wstep_template,
-                upn=options.wstep_upn,
-                out_path=options.wstep_out,
-                insecure_ssl=options.insecure_ssl,
-                user_agent=options.user_agent or DEFAULT_USER_AGENT,
-                auth_dc=options.auth_dc,
-            )
+                    run_list_policies(
+                        remote_name=remoteName,
+                        cep_url=options.cep_url,
+                        ca_name=options.wstep_ca,
+                        insecure_ssl=options.insecure_ssl,
+                        user_agent=options.user_agent or DEFAULT_USER_AGENT,
+                    )
+                else:
+                    from src.cert_enroll_wstep import run_enroll
+                    from src.cert_enroll_xcep import DEFAULT_USER_AGENT
+
+                    run_enroll(
+                        remote_name=remoteName,
+                        ces_url=options.ces_url,
+                        cep_url=options.cep_url,
+                        ca_name=options.wstep_ca,
+                        template_name=options.wstep_template,
+                        upn=options.wstep_upn,
+                        out_path=options.wstep_out,
+                        insecure_ssl=options.insecure_ssl,
+                        user_agent=options.user_agent or DEFAULT_USER_AGENT,
+                        auth_dc=options.auth_dc,
+                    )
 
         # Enumeration / Pull operations (default)
         else:
