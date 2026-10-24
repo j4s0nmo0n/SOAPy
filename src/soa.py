@@ -796,6 +796,68 @@ github.com/jlevere
         help="Retrieve forest topology via MS-ADCAP TopologyManagement/GetADForest",
     )
 
+    wstep_grp = parser.add_argument_group('WS-Trust enrollment (MS-XCEP + MS-WSTEP)')
+    wstep_grp.add_argument(
+        "--list-policies-ws",
+        dest="list_policies_ws",
+        action="store_true",
+        help="List AD CS enrollment policies via MS-XCEP GetPolicies",
+    )
+    wstep_grp.add_argument(
+        "--enroll-ws",
+        dest="enroll_ws",
+        action="store_true",
+        help="Request a certificate via MS-WSTEP RequestSecurityToken",
+    )
+    wstep_grp.add_argument(
+        "--cep-url",
+        dest="cep_url",
+        action="store",
+        metavar="URL",
+        help="MS-XCEP (Policy) endpoint URL (default: derived from --ca + DC hostname)",
+    )
+    wstep_grp.add_argument(
+        "--ces-url",
+        dest="ces_url",
+        action="store",
+        metavar="URL",
+        help="MS-WSTEP (Enrollment) endpoint URL (default: derived from --ca + DC hostname)",
+    )
+    wstep_grp.add_argument(
+        "--ca",
+        dest="wstep_ca",
+        action="store",
+        metavar="NAME",
+        help="CA name (e.g. jjk-CA) used to build default --cep-url/--ces-url",
+    )
+    wstep_grp.add_argument(
+        "--template",
+        dest="wstep_template",
+        action="store",
+        metavar="NAME",
+        help="Certificate template name (resolved to OID via MS-XCEP)",
+    )
+    wstep_grp.add_argument(
+        "--upn",
+        dest="wstep_upn",
+        action="store",
+        metavar="UPN",
+        help="UPN to embed as SAN otherName (e.g. administrator@jjk.local)",
+    )
+    wstep_grp.add_argument(
+        "--out",
+        dest="wstep_out",
+        action="store",
+        metavar="PATH",
+        help="Output .pfx path for --enroll-ws",
+    )
+    wstep_grp.add_argument(
+        "--insecure-ssl",
+        dest="insecure_ssl",
+        action="store_true",
+        help="Disable TLS verification for CES/CEP (lab only)",
+    )
+
     if len(sys.argv) == 1:
         parser.print_help()
         sys.exit(1)
@@ -1178,6 +1240,31 @@ github.com/jlevere
                         print(f"{label + ':':<{col_width}} (none)")
                 else:
                     print(f"{label + ':':<{col_width}} {val}")
+
+        # WS-Trust certificate enrollment (MS-XCEP + MS-WSTEP)
+        elif options.list_policies_ws:
+            from src.cert_enroll_xcep import run_list_policies
+
+            run_list_policies(
+                remote_name=remoteName,
+                cep_url=options.cep_url,
+                ca_name=options.wstep_ca,
+                insecure_ssl=options.insecure_ssl,
+            )
+
+        elif options.enroll_ws:
+            from src.cert_enroll_wstep import run_enroll
+
+            run_enroll(
+                remote_name=remoteName,
+                ces_url=options.ces_url,
+                cep_url=options.cep_url,
+                ca_name=options.wstep_ca,
+                template_name=options.wstep_template,
+                upn=options.wstep_upn,
+                out_path=options.wstep_out,
+                insecure_ssl=options.insecure_ssl,
+            )
 
         # Enumeration / Pull operations (default)
         else:

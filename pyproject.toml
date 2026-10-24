@@ -17,6 +17,8 @@ python = "^3.10"
 impacket = ">=0.12.0"
 typing-extensions = "^4.0.0"
 dsinternals = "^1.2.5"
+requests = "^2.32.0"
+requests-gssapi = "^1.4.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.2.2"

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
+            xmlns:a="http://www.w3.org/2005/08/addressing"
+            xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <s:Header>
+    <a:Action s:mustUnderstand="1">http://schemas.microsoft.com/windows/pki/2009/01/enrollmentpolicy/IPolicy/GetPolicies</a:Action>
+    <a:MessageID>urn:uuid:{msg_id}</a:MessageID>
+    <a:ReplyTo>
+      <a:Address>http://www.w3.org/2005/08/addressing/anonymous</a:Address>
+    </a:ReplyTo>
+    <a:To s:mustUnderstand="1">{to_url}</a:To>
+  </s:Header>
+  <s:Body>
+    <GetPolicies xmlns="http://schemas.microsoft.com/windows/pki/2009/01/enrollmentpolicy">
+      <client>
+        <lastUpdate xsi:nil="true"/>
+        <preferredLanguage>en-US</preferredLanguage>
+      </client>
+      <requestFilter xsi:nil="true"/>
+    </GetPolicies>
+  </s:Body>
+</s:Envelope>
