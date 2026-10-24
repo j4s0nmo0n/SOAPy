@@ -11,6 +11,7 @@ packages = [{ include = "src" }]
 
 [tool.poetry.scripts]
 SOAPy = "src:run_cli"
+soapy = "src.soa:run_cli"
 
 [tool.poetry.dependencies]
 python = "^3.10"

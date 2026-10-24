@@ -176,3 +176,9 @@ loot/
 
 # Local dev convenience files not tracked upstream
 Pipfile
+
+# Credential artifacts produced by MS-WSTEP enrollment / certipy chain
+# Should always land in /tmp, this is the belt-and-braces guard
+*.pfx
+*.ccache
+poetry.lock

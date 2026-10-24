@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import requests
+import urllib3
 
 try:
     from requests_gssapi import OPTIONAL as _GSS_OPTIONAL
@@ -51,6 +52,11 @@ XCEP_ACTION = (
 )
 
 DEFAULT_CEP_PATH = "/ADPolicyProvider_CEP_Kerberos/service.svc/CEP"
+
+DEFAULT_USER_AGENT = (
+    "Mozilla/4.0 (compatible; MSIE 6.0; "
+    "MS Web Services Client Protocol 4.0.30319.42000)"
+)
 
 _TEMPLATE_PATH = Path(__file__).parent / "templates" / "xcep_get_policies.xml"
 
@@ -128,15 +134,19 @@ def get_policies(
     auth,
     verify: bool = True,
     timeout: float = 30.0,
+    user_agent: str = DEFAULT_USER_AGENT,
 ) -> GetPoliciesResult:
     """Call MS-XCEP ``GetPolicies`` against ``host`` (full CEP URL).
 
     Returns a parsed :class:`GetPoliciesResult`. Raises :class:`ConnectionError`
     with a lab-friendly message on TLS verification failure.
     """
+    if not verify:
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     body = build_get_policies_request(host)
     headers = {
         "Content-Type": f'application/soap+xml; charset=utf-8; action="{XCEP_ACTION}"',
+        "User-Agent": user_agent,
     }
     try:
         resp = requests.post(
@@ -348,8 +358,11 @@ def run_list_policies(
     cep_url: Optional[str],
     ca_name: Optional[str],
     insecure_ssl: bool,
+    user_agent: str = DEFAULT_USER_AGENT,
 ) -> None:
     """CLI dispatch for ``--list-policies-ws`` — prints a table or exits non-zero."""
+    if insecure_ssl:
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     url = cep_url
     if not url:
         if not ca_name:
@@ -366,7 +379,7 @@ def run_list_policies(
         raise SystemExit(1) from exc
 
     try:
-        result = get_policies(url, auth, verify=not insecure_ssl)
+        result = get_policies(url, auth, verify=not insecure_ssl, user_agent=user_agent)
     except ConnectionError as exc:
         logging.critical(str(exc))
         raise SystemExit(1) from exc

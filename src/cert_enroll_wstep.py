@@ -22,11 +22,13 @@ from pathlib import Path
 from typing import Optional
 
 import requests
+import urllib3
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.serialization import pkcs12
 
 from src.cert_enroll_xcep import (
+    DEFAULT_USER_AGENT,
     SOAP_ENV_NS,
     default_cep_url,
     get_policies,
@@ -81,6 +83,7 @@ def request_cert(
     auth,
     verify_ssl: bool = True,
     timeout: float = 60.0,
+    user_agent: str = DEFAULT_USER_AGENT,
 ) -> bytes:
     """Submit the CSR via MS-WSTEP RequestSecurityToken and return the issued cert DER.
 
@@ -89,9 +92,12 @@ def request_cert(
     kept in the signature for future renew-id or multi-CA scenarios.
     """
     del ca_name  # reserved for future use
+    if not verify_ssl:
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     body = build_rst_request(host, csr_der, template_oid)
     headers = {
         "Content-Type": f'application/soap+xml; charset=utf-8; action="{WSTEP_ACTION}"',
+        "User-Agent": user_agent,
     }
 
     logging.debug("MS-WSTEP RST (to %s):\n%s", host, body)
@@ -161,6 +167,8 @@ def run_enroll(
     upn: Optional[str],
     out_path: Optional[str],
     insecure_ssl: bool,
+    user_agent: str = DEFAULT_USER_AGENT,
+    auth_dc: Optional[str] = None,
 ) -> None:
     """CLI dispatch for ``--enroll-ws``: XCEP → CSR → WSTEP → PFX.
 
@@ -169,6 +177,8 @@ def run_enroll(
     export. Writes the PFX to ``out_path`` with mode 0600 and prints the
     issued cert's subject plus a ``certipy auth`` hint.
     """
+    if insecure_ssl:
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     if not template_name:
         logging.critical("--enroll-ws requires --template")
         raise SystemExit(1)
@@ -202,7 +212,7 @@ def run_enroll(
     verify = not insecure_ssl
 
     try:
-        policies = get_policies(final_cep_url, auth, verify=verify)
+        policies = get_policies(final_cep_url, auth, verify=verify, user_agent=user_agent)
     except ConnectionError as exc:
         logging.critical(str(exc))
         raise SystemExit(1) from exc
@@ -238,6 +248,7 @@ def run_enroll(
             csr_der,
             auth,
             verify_ssl=verify,
+            user_agent=user_agent,
         )
     except ConnectionError as exc:
         logging.critical(str(exc))
@@ -268,4 +279,31 @@ def run_enroll(
     print(f"    subject: {enrolled_cert.subject.rfc4514_string()}")
     print(f"    issuer:  {enrolled_cert.issuer.rfc4514_string()}")
     print(f"    serial:  {hex(enrolled_cert.serial_number)}")
-    print(f"[+] Try: certipy auth -pfx {out_path} -dc-ip <DC_IP>")
+    if not auth_dc:
+        print(f"[+] Try: certipy auth -pfx {out_path} -dc-ip <DC_IP>")
+
+    if auth_dc:
+        import shutil
+        import subprocess
+        import tempfile
+
+        certipy_bin = shutil.which("certipy") or shutil.which("certipy-ad")
+        if not certipy_bin:
+            print("[-] certipy not found in PATH — install python3-certipy or run manually:")
+            print(f"    certipy auth -pfx {out} -dc-ip {auth_dc}")
+            return
+
+        print(f"[*] Chaining: {certipy_bin} auth -pfx {out} -dc-ip {auth_dc}")
+        cmd = [certipy_bin, "auth", "-pfx", str(out), "-dc-ip", auth_dc, "-no-save"]
+        with tempfile.TemporaryDirectory(prefix="soapy-authdc-") as workdir:
+            try:
+                result = subprocess.run(
+                    cmd,
+                    cwd=workdir,
+                    check=False,
+                    text=True,
+                )
+                if result.returncode != 0:
+                    print(f"[-] certipy exited with code {result.returncode}")
+            except Exception as exc:
+                print(f"[-] certipy chain failed: {exc}")

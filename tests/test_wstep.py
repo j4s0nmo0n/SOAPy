@@ -29,7 +29,7 @@ from src.cert_enroll_wstep import (
     build_rst_request,
     parse_rstr_response,
 )
-from src.cert_enroll_xcep import CA, GetPoliciesResult, Template
+from src.cert_enroll_xcep import CA, DEFAULT_USER_AGENT, GetPoliciesResult, Template
 
 
 # ---------------------------------------------------------------------------
@@ -196,10 +196,12 @@ def _issue_fake_cert_from_csr(csr_der: bytes) -> bytes:
 def test_wstep_cmd_enroll_integration(monkeypatch, tmp_path, capsys):
     captured_csr: dict = {}
 
-    def fake_request_cert(host, ca_name, template_oid, csr_der, auth, verify_ssl=True, timeout=60.0):
+    def fake_request_cert(host, ca_name, template_oid, csr_der, auth,
+                          verify_ssl=True, timeout=60.0, user_agent=None):
         captured_csr["der"] = csr_der
         captured_csr["template_oid"] = template_oid
         captured_csr["host"] = host
+        captured_csr["user_agent"] = user_agent
         return _issue_fake_cert_from_csr(csr_der)
 
     monkeypatch.setattr(cert_enroll_wstep, "kerberos_auth", lambda: None)
@@ -225,6 +227,8 @@ def test_wstep_cmd_enroll_integration(monkeypatch, tmp_path, capsys):
     # URL derivation hit the default CES/CEP builders.
     assert captured_csr["host"].endswith("/jjk-CA_CES_Kerberos/service.svc/CES")
     assert captured_csr["template_oid"] == "1.3.6.1.4.1.311.21.8.1.3"
+    # Default User-Agent reached request_cert without an explicit override.
+    assert captured_csr["user_agent"] == DEFAULT_USER_AGENT
 
     assert out.exists()
     assert (out.stat().st_mode & 0o777) == 0o600
@@ -250,3 +254,78 @@ def test_wstep_cmd_enroll_integration(monkeypatch, tmp_path, capsys):
     assert "Certificate enrolled" in stdout
     assert str(out) in stdout
     assert "certipy auth -pfx" in stdout
+
+
+def test_wstep_cmd_enroll_chains_certipy_auth(monkeypatch, tmp_path, capsys):
+    import os
+    import shutil as _shutil
+    import subprocess as _subprocess
+
+    def fake_request_cert(host, ca_name, template_oid, csr_der, auth,
+                          verify_ssl=True, timeout=60.0, user_agent=None):
+        return _issue_fake_cert_from_csr(csr_der)
+
+    monkeypatch.setattr(cert_enroll_wstep, "kerberos_auth", lambda: None)
+    monkeypatch.setattr(
+        cert_enroll_wstep,
+        "get_policies",
+        lambda *a, **kw: _fake_policies_with("ESC4Test"),
+    )
+    monkeypatch.setattr(cert_enroll_wstep, "request_cert", fake_request_cert)
+
+    captured: dict = {}
+
+    def fake_which(name):
+        if name == "certipy":
+            return "/usr/local/bin/certipy"
+        return None
+
+    class FakeCompleted:
+        returncode = 0
+
+    def fake_run(cmd, cwd=None, check=False, text=False):
+        captured["cmd"] = cmd
+        captured["cwd"] = cwd
+        captured["cwd_exists_at_call"] = os.path.isdir(cwd) if cwd else False
+        captured["check"] = check
+        captured["text"] = text
+        return FakeCompleted()
+
+    monkeypatch.setattr(_shutil, "which", fake_which)
+    monkeypatch.setattr(_subprocess, "run", fake_run)
+
+    out = tmp_path / "esc4.pfx"
+    cert_enroll_wstep.run_enroll(
+        remote_name="dc-curse.jjk.local",
+        ces_url=None,
+        cep_url=None,
+        ca_name="jjk-CA",
+        template_name="ESC4Test",
+        upn="administrator@jjk.local",
+        out_path=str(out),
+        insecure_ssl=True,
+        auth_dc="1.2.3.4",
+    )
+
+    # Subprocess ran from an isolated, existing tempdir (auto-cleaned on exit).
+    assert captured["cwd"] is not None
+    assert captured["cwd_exists_at_call"] is True
+    assert "soapy-authdc-" in os.path.basename(captured["cwd"])
+    # After run_enroll returns, the TemporaryDirectory is cleaned up.
+    assert not os.path.isdir(captured["cwd"])
+
+    cmd = captured["cmd"]
+    assert cmd[0] == "/usr/local/bin/certipy"
+    assert cmd[1] == "auth"
+    assert "-pfx" in cmd
+    assert str(out) in cmd
+    assert "-dc-ip" in cmd
+    assert "1.2.3.4" in cmd
+    # Suppress ccache write when certipy supports it.
+    assert "-no-save" in cmd
+
+    stdout = capsys.readouterr().out
+    # The placeholder "Try:" hint is suppressed when auth_dc is passed.
+    assert "<DC_IP>" not in stdout
+    assert "Chaining:" in stdout
+    assert "1.2.3.4" in stdout

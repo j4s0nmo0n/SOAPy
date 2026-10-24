@@ -857,6 +857,28 @@ github.com/jlevere
         action="store_true",
         help="Disable TLS verification for CES/CEP (lab only)",
     )
+    wstep_grp.add_argument(
+        "--user-agent",
+        dest="user_agent",
+        action="store",
+        metavar="UA",
+        default=None,
+        help=(
+            "Override User-Agent for MS-XCEP/MS-WSTEP requests "
+            "(default: Microsoft Web Services Client Protocol fingerprint, "
+            "matching certreq.exe)"
+        ),
+    )
+    wstep_grp.add_argument(
+        "--auth-dc",
+        default=None,
+        metavar="IP_OR_FQDN",
+        help=(
+            "After successful --enroll-ws, chain certipy auth against the "
+            "given DC IP or FQDN to retrieve the NT hash. Requires certipy "
+            "in PATH. Example: --auth-dc 192.168.56.101"
+        ),
+    )
 
     if len(sys.argv) == 1:
         parser.print_help()
@@ -1243,17 +1265,19 @@ github.com/jlevere
 
         # WS-Trust certificate enrollment (MS-XCEP + MS-WSTEP)
         elif options.list_policies_ws:
-            from src.cert_enroll_xcep import run_list_policies
+            from src.cert_enroll_xcep import DEFAULT_USER_AGENT, run_list_policies
 
             run_list_policies(
                 remote_name=remoteName,
                 cep_url=options.cep_url,
                 ca_name=options.wstep_ca,
                 insecure_ssl=options.insecure_ssl,
+                user_agent=options.user_agent or DEFAULT_USER_AGENT,
             )
 
         elif options.enroll_ws:
             from src.cert_enroll_wstep import run_enroll
+            from src.cert_enroll_xcep import DEFAULT_USER_AGENT
 
             run_enroll(
                 remote_name=remoteName,
@@ -1264,6 +1288,8 @@ github.com/jlevere
                 upn=options.wstep_upn,
                 out_path=options.wstep_out,
                 insecure_ssl=options.insecure_ssl,
+                user_agent=options.user_agent or DEFAULT_USER_AGENT,
+                auth_dc=options.auth_dc,
             )
 
         # Enumeration / Pull operations (default)
