@@ -886,6 +886,48 @@ github.com/jlevere
         help="NTDS Settings DN for --get-dc (repeatable, required). Example: "
              "CN=NTDS Settings,CN=DC-01,CN=Servers,CN=Site1,CN=Sites,CN=Configuration,DC=example,DC=local",
     )
+    adcap_grp.add_argument(
+        "--get-group-member",
+        dest="get_group_member",
+        metavar="GROUP",
+        default=None,
+        help="MS-ADCAP AccountManagement/GetADGroupMember — direct members of GROUP "
+             "(DN by default, see --principal-format)",
+    )
+    adcap_grp.add_argument(
+        "--get-group-membership",
+        dest="get_group_membership",
+        metavar="PRINCIPAL",
+        default=None,
+        help="MS-ADCAP AccountManagement/GetADPrincipalGroupMembership — direct "
+             "groups of PRINCIPAL",
+    )
+    adcap_grp.add_argument(
+        "--get-auth-groups",
+        dest="get_auth_groups",
+        metavar="PRINCIPAL",
+        default=None,
+        help="MS-ADCAP AccountManagement/GetADPrincipalAuthorizationGroup — "
+             "transitive groups of PRINCIPAL (nested resolved server-side)",
+    )
+    adcap_grp.add_argument(
+        "--principal-format",
+        dest="principal_format",
+        choices=["dn", "canonical"],
+        default="dn",
+        help="Format of the principal/group identity for --get-group-member / "
+             "--get-group-membership / --get-auth-groups (default: dn)",
+    )
+    adcap_grp.add_argument(
+        "--partition-dn",
+        dest="partition_dn",
+        metavar="DN",
+        default=None,
+        help="NC/partition DN for --get-group-member / --get-group-membership / "
+             "--get-auth-groups. Mandatory server-side (undocumented). Auto-derived "
+             "from the identity's trailing DC= components when --principal-format=dn; "
+             "required when --principal-format=canonical.",
+    )
 
     wstep_grp = parser.add_argument_group('WS-Trust enrollment (MS-XCEP + MS-WSTEP)')
     wstep_grp.add_argument(
@@ -1367,6 +1409,47 @@ github.com/jlevere
                 cap_client, options.ntds_settings_dn,
             )
             print(_format_adcap_dict_soapy_style(dc))
+
+        # ADCAP GetADGroupMember / GetADPrincipalGroupMembership /
+        # GetADPrincipalAuthorizationGroup — print the parsed list of
+        # principals/groups as indented JSON.
+        elif options.get_group_member or options.get_group_membership or options.get_auth_groups:
+            import json as _json
+            format_offered = (
+                "DistinguishedName" if options.principal_format == "dn" else "CanonicalName"
+            )
+            identity = (
+                options.get_group_member
+                or options.get_group_membership
+                or options.get_auth_groups
+            )
+            partition_dn = options.partition_dn
+            if not partition_dn and options.principal_format == "dn":
+                partition_dn = adcap.partition_dn_from_identity(identity)
+            if not partition_dn:
+                logging.critical(
+                    "--partition-dn is required (server rejects an empty PartitionDN "
+                    "with MustSupplyPartitionDn). It could not be auto-derived from "
+                    "identity %r (either not a DN, or --principal-format=canonical).",
+                    identity,
+                )
+                raise SystemExit(1)
+            cap_client = ADWSConnect.accounts_cap_client(
+                ip=remoteName, domain=domain, username=username, auth=auth,
+            )
+            if options.get_group_member:
+                items = adcap.get_ad_group_member(
+                    cap_client, identity, partition_dn, format_offered,
+                )
+            elif options.get_group_membership:
+                items = adcap.get_ad_principal_group_membership(
+                    cap_client, identity, partition_dn, format_offered,
+                )
+            else:
+                items = adcap.get_ad_principal_authorization_group(
+                    cap_client, identity, partition_dn, format_offered,
+                )
+            print(_json.dumps(items, indent=2))
 
         # ADCAP GetVersion — one short line, no table needed. The server
         # ships a version_string that already includes "Active Directory

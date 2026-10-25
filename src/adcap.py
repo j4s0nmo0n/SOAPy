@@ -16,6 +16,19 @@ Implementation gotchas (all empirically verified against a real DC):
    the actual SOAP wire format expects the string form:
    <ca:FormatDesired>CanonicalName</ca:FormatDesired>.
    Sending an integer produces a DeserializationFailed fault.
+
+4. The <ca:PartitionDN> parameter is MANDATORY on the AccountManagement
+   group-membership primitives (GetADGroupMember,
+   GetADPrincipalGroupMembership, GetADPrincipalAuthorizationGroup)
+   even though the WSDL marks it optional — an empty or missing value
+   yields an ArgumentError (MustSupplyPartitionDn / EArgument). Supply
+   the NC the server should search, e.g. DC=example,DC=local.
+
+5. On those three primitives the identity parameter is NOT called
+   <ca:Identity>: GetADGroupMember expects <ca:GroupDN>, both
+   Principal* primitives expect <ca:PrincipalDN>. An <Identity> element
+   is silently dropped (per gotcha #2) and the server reports the
+   intended parameter as missing.
 """
 
 import logging
@@ -556,3 +569,271 @@ def get_ad_domain_controller(
     resp = _send_recv(client, soap)
     _check_fault(resp)
     return _parse_dc_payload(resp)
+
+
+# ---------------------------------------------------------------------------
+# AccountManagement — group membership primitives
+#
+# The 3 primitives share the same body shape (FormatOffered + an identity
+# field + PartitionDN, all alphabetical per gotcha #2) but differ in the
+# identity field name and the response wrapper:
+#
+#   Primitive                           Identity field  Response wrapper (item)
+#   GetADGroupMember                    GroupDN         <Members>         (<ActiveDirectoryPrincipal>)
+#   GetADPrincipalGroupMembership       PrincipalDN     <MemberOf>        (<ActiveDirectoryGroup>)
+#   GetADPrincipalAuthorizationGroup    PrincipalDN     <MemberOf>  (*)   (<ActiveDirectoryGroup>)
+#
+# (*) Spec says <AuthorizationGroups>; Windows Server 2025 (build 26100)
+# actually emits <MemberOf>. The parser accepts both.
+#
+# GetADPrincipalAuthorizationGroup is the interesting one: the server
+# resolves nested group membership transitively, so the client does NOT
+# need a recursive LDAP walk. It runs under the caller's security context
+# though, so a low-privilege caller cannot ask about a privileged
+# principal (returns ESecurityPrincipalOperation / Win32 ACCESS_DENIED).
+# ---------------------------------------------------------------------------
+
+
+# Scalars observed on both <ActiveDirectoryPrincipal> (user/computer members)
+# and <ActiveDirectoryGroup> (groups). GroupScope / GroupType are only
+# present on groups; _scalar returns None on absence, which is skipped from
+# the output dict.
+_AD_PRINCIPAL_SCALARS = (
+    "DistinguishedName", "Name", "ObjectClass", "ObjectGuid",
+    "ReferenceServer", "SamAccountName",
+    "GroupScope", "GroupType",
+)
+
+
+def _parse_ad_principal(block: str) -> dict:
+    """Parse one <ActiveDirectoryPrincipal> or <ActiveDirectoryGroup>
+    element body (the inner XML, NOT including the wrapper tag itself)
+    into a dict. SID is base64-decoded to canonical ``S-1-5-…`` form.
+    ObjectTypes is flattened to list[str].
+
+    Field presence is checked FIRST so a present-but-nil scalar
+    (``<DistinguishedName i:nil="true"/>`` on well-known SIDs like
+    Everyone / Authenticated Users) comes out as ``None`` in the dict,
+    while a truly absent scalar (e.g. GroupScope on an
+    ActiveDirectoryPrincipal user) stays omitted. ``_scalar`` collapses
+    both cases to None, so distinguishing them requires a prior presence
+    probe.
+    """
+    out: dict = {}
+    for tag in _AD_PRINCIPAL_SCALARS:
+        if re.search(rf"<{_NS_PREFIX}{re.escape(tag)}\b", block):
+            out[_pascal_to_snake(tag)] = _scalar(block, tag)
+    types = _array(block, "ObjectTypes")
+    if types is not None:
+        out["object_types"] = types
+    if re.search(rf"<{_NS_PREFIX}SID\b", block):
+        sid_b64 = _scalar(block, "SID")
+        out["sid"] = _decode_binary_sid_b64(sid_b64) if sid_b64 else None
+    return out
+
+
+def _parse_principal_list(
+    resp: str, wrapper_tag, item_tag: str,
+) -> list[dict]:
+    """Extract items of local name ``item_tag`` nested under ``wrapper_tag``.
+
+    ``wrapper_tag`` is either a single element name or a tuple of candidate
+    names tried in order — the first that matches wins. This tolerance is
+    needed because MS-ADCAP primitives disagree with their own spec:
+    GetADPrincipalAuthorizationGroup is spec'd to return
+    ``<AuthorizationGroups>`` but Windows Server 2025 (build 26100) emits
+    ``<MemberOf>`` instead. Pass a tuple to accept both.
+
+    Returns ``[]`` when no candidate wrapper is present or when the chosen
+    wrapper has no ``<item_tag>`` children.
+    """
+    candidates = (
+        (wrapper_tag,) if isinstance(wrapper_tag, str) else tuple(wrapper_tag)
+    )
+    for tag in candidates:
+        wrapper_m = re.search(
+            rf"<{_NS_PREFIX}{re.escape(tag)}\b[^>]*>(.*?)</{_NS_PREFIX}{re.escape(tag)}>",
+            resp, re.DOTALL,
+        )
+        if wrapper_m:
+            body = wrapper_m.group(1)
+            items = re.findall(
+                rf"<{_NS_PREFIX}{re.escape(item_tag)}\b[^>]*>(.*?)</{_NS_PREFIX}{re.escape(item_tag)}>",
+                body, re.DOTALL,
+            )
+            return [_parse_ad_principal(it) for it in items]
+    return []
+
+
+def _account_envelope(fqdn: str, uid: str, action: str, body: str) -> str:
+    """Build a WS-Addressing SOAP envelope targeting the AccountManagement
+    endpoint. ``body`` is the raw <s:Body> content (one Request element).
+    """
+    return f"""<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
+    xmlns:a="http://www.w3.org/2005/08/addressing"
+    xmlns:ca="http://schemas.microsoft.com/2008/1/ActiveDirectory/CustomActions">
+    <s:Header>
+        <a:Action s:mustUnderstand="1">http://schemas.microsoft.com/2008/1/ActiveDirectory/CustomActions/AccountManagement/{action}</a:Action>
+        <ca:Server>ldap:389</ca:Server>
+        <a:MessageID>urn:uuid:{uid}</a:MessageID>
+        <a:ReplyTo>
+            <a:Address>http://www.w3.org/2005/08/addressing/anonymous</a:Address>
+        </a:ReplyTo>
+        <a:To s:mustUnderstand="1">net.tcp://{fqdn}:9389/ActiveDirectoryWebServices/Windows/AccountManagement</a:To>
+    </s:Header>
+    <s:Body>
+        {body}
+    </s:Body>
+</s:Envelope>"""
+
+
+def _account_body(action: str, fields: dict[str, str]) -> str:
+    """Build a <ca:{action}Request> body, serialising ``fields`` in strict
+    alphabetical order (gotcha #2 — WCF DataContract silently drops
+    out-of-order elements, so e.g. ``GroupDN`` must appear before
+    ``PartitionDN`` but ``PrincipalDN`` must appear AFTER it).
+
+    PartitionDN is MANDATORY server-side on the 3 group-membership
+    primitives even though the WSDL marks it optional (empirical:
+    ``MustSupplyPartitionDn`` / ``EArgument`` fault otherwise). Each
+    primitive also has its own identity field name — ``GroupDN`` for
+    GetADGroupMember, ``PrincipalDN`` for the two Principal ones —
+    anything else (e.g. a generic ``<Identity>``) is silently dropped.
+    """
+    parts = "".join(
+        f"<ca:{k}>{v}</ca:{k}>" for k, v in sorted(fields.items())
+    )
+    return f"<ca:{action}Request>{parts}</ca:{action}Request>"
+
+
+def partition_dn_from_identity(identity: str) -> str | None:
+    """Derive the naming-context DN from a DN-form identity.
+
+    ``CN=Domain Admins,CN=Users,DC=jjk,DC=local`` → ``DC=jjk,DC=local``.
+    Returns ``None`` when the identity has no trailing ``DC=`` components
+    (e.g. a CanonicalName or malformed DN) — the caller must then supply
+    PartitionDN explicitly.
+    """
+    m = re.search(r"(DC=[^,]+(?:,\s*DC=[^,]+)*)\s*$", identity, re.IGNORECASE)
+    return m.group(1).replace(" ", "") if m else None
+
+
+def _require_account_mgmt(client: ADWSConnect, caller: str) -> None:
+    if client._resource != "AccountManagement":
+        raise RuntimeError(
+            f"{caller} requires ADWSConnect.accounts_cap_client(); "
+            f"got resource={client._resource!r}"
+        )
+
+
+def get_ad_group_member(
+    client: ADWSConnect,
+    group_dn: str,
+    partition_dn: str,
+    format_offered: str = "DistinguishedName",
+) -> list[dict]:
+    """MS-ADCAP AccountManagement GetADGroupMember.
+
+    Lists direct members of ``group_dn``. ``partition_dn`` is the NC the
+    server searches (e.g. ``DC=example,DC=local``) — mandatory server-side
+    despite the WSDL marking it optional. The identity field is named
+    ``GroupDN`` here (not ``Identity``), and the response wraps members in
+    ``<Members><ActiveDirectoryPrincipal>…`` entries.
+
+    Returns a list of dicts, one per direct member, with keys:
+    distinguished_name, name, object_class, object_guid, object_types
+    (list), reference_server, sid (canonical form), sam_account_name.
+    """
+    _require_account_mgmt(client, "get_ad_group_member")
+    uid = str(uuid4())
+    body = _account_body("GetADGroupMember", {
+        "FormatOffered": format_offered,
+        "GroupDN": group_dn,
+        "PartitionDN": partition_dn,
+    })
+    soap = _account_envelope(client._fqdn, uid, "GetADGroupMember", body)
+    logging.info(
+        "ADCAP GetADGroupMember via %s (group=%s, partition=%s)",
+        client._fqdn, group_dn, partition_dn,
+    )
+    resp = _send_recv(client, soap)
+    _check_fault(resp)
+    return _parse_principal_list(resp, "Members", "ActiveDirectoryPrincipal")
+
+
+def get_ad_principal_group_membership(
+    client: ADWSConnect,
+    principal_dn: str,
+    partition_dn: str,
+    format_offered: str = "DistinguishedName",
+) -> list[dict]:
+    """MS-ADCAP AccountManagement GetADPrincipalGroupMembership — direct
+    groups ``principal_dn`` belongs to (equivalent to reading its memberOf
+    attribute; no nested resolution). The identity field is named
+    ``PrincipalDN``; the response wraps groups in
+    ``<MemberOf><ActiveDirectoryGroup>…`` entries.
+
+    Returns a list of dicts, one per direct group, with the same scalar
+    fields as GetADGroupMember plus ``group_scope`` and ``group_type``.
+    """
+    _require_account_mgmt(client, "get_ad_principal_group_membership")
+    uid = str(uuid4())
+    body = _account_body("GetADPrincipalGroupMembership", {
+        "FormatOffered": format_offered,
+        "PartitionDN": partition_dn,
+        "PrincipalDN": principal_dn,
+    })
+    soap = _account_envelope(
+        client._fqdn, uid, "GetADPrincipalGroupMembership", body,
+    )
+    logging.info(
+        "ADCAP GetADPrincipalGroupMembership via %s (principal=%s, partition=%s)",
+        client._fqdn, principal_dn, partition_dn,
+    )
+    resp = _send_recv(client, soap)
+    _check_fault(resp)
+    return _parse_principal_list(resp, "MemberOf", "ActiveDirectoryGroup")
+
+
+def get_ad_principal_authorization_group(
+    client: ADWSConnect,
+    principal_dn: str,
+    partition_dn: str,
+    format_offered: str = "DistinguishedName",
+) -> list[dict]:
+    """MS-ADCAP AccountManagement GetADPrincipalAuthorizationGroup — the
+    TRANSITIVE groups of ``principal_dn`` (nested groups resolved
+    server-side). The interesting primitive: no recursive LDAP walk needed
+    client-side.
+
+    Caveat: the server runs the lookup under the caller's security
+    context, so querying a privileged principal (e.g. Administrator) from
+    a low-privilege session returns ``ESecurityPrincipalOperation`` /
+    Win32 error 5 (ACCESS_DENIED). Query a principal the caller actually
+    has rights over (typically themselves).
+
+    Response structure: ``<MemberOf><ActiveDirectoryGroup>…`` as observed
+    on Windows Server 2025 (build 26100) — this does NOT match the
+    MS-ADCAP spec, which names the wrapper ``<AuthorizationGroups>``. Both
+    are accepted (tuple below) to stay forward-compatible with servers
+    that may follow the spec.
+    """
+    _require_account_mgmt(client, "get_ad_principal_authorization_group")
+    uid = str(uuid4())
+    body = _account_body("GetADPrincipalAuthorizationGroup", {
+        "FormatOffered": format_offered,
+        "PartitionDN": partition_dn,
+        "PrincipalDN": principal_dn,
+    })
+    soap = _account_envelope(
+        client._fqdn, uid, "GetADPrincipalAuthorizationGroup", body,
+    )
+    logging.info(
+        "ADCAP GetADPrincipalAuthorizationGroup via %s (principal=%s, partition=%s)",
+        client._fqdn, principal_dn, partition_dn,
+    )
+    resp = _send_recv(client, soap)
+    _check_fault(resp)
+    return _parse_principal_list(
+        resp, ("MemberOf", "AuthorizationGroups"), "ActiveDirectoryGroup",
+    )
