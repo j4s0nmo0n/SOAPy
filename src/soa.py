@@ -332,7 +332,7 @@ def set_generic_attribute(
             return
 
     short_attr = attribute.split(":")[-1]
-    print(f"[+] {short_attr} écrit avec succès sur {target_dn} (op={operation})")
+    print(f"[+] {short_attr} written successfully on {target_dn} (op={operation})")
 
 
 def set_spn(
@@ -755,15 +755,15 @@ github.com/jlevere
 
     # Generic attribute write
     writing.add_argument("--set-attribute", action="store_true",
-        help="Écrit un attribut arbitraire sur un objet AD via ADWS Resource Put")
+        help="Write an arbitrary attribute on an AD object via ADWS Resource Put")
     writing.add_argument("--target-dn", metavar="TARGET_DN",
-        help="DN complet de l'objet à modifier (utiliser avec --set-attribute)")
+        help="Full DN of the object to modify (use with --set-attribute)")
     writing.add_argument("--attribute", metavar="ATTR",
-        help="Nom de l'attribut LDAP à modifier (préfixe addata: ajouté automatiquement)")
+        help="LDAP attribute name to modify (addata: prefix added automatically)")
     writing.add_argument("--attr-value", metavar="VALUE", action="append",
-        help="Valeur à écrire (répétable pour multi-valued)")
+        help="Value to write (repeatable for multi-valued attributes)")
     writing.add_argument("--attr-op", choices=["add", "replace", "delete"],
-        default="replace", help="Opération LDAP (défaut : replace)")
+        default="replace", help="LDAP operation (default: replace)")
 
     # MS-ADCAP options
     adcap_grp = parser.add_argument_group('MS-ADCAP')
