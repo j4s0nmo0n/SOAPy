@@ -2,6 +2,7 @@
 
 import argparse
 import logging
+import re
 import sys
 from base64 import b64decode, b64encode
 import base64
@@ -629,6 +630,61 @@ def bind_adws(
     return True
 
 
+_ADCAP_LABEL_COL = 29
+
+
+def _snake_to_label(name: str) -> str:
+    """``application_partitions`` -> ``Application Partitions``.
+    Keeps canonical AD acronyms (DNS, SID, PDC, RID, NTDS, FSMO) uppercased.
+    """
+    acronyms = {
+        "dns", "sid", "pdc", "rid", "ntds", "fsmo", "spn", "upn",
+        "ipv4", "ipv6", "ldap", "ssl", "guid", "bios", "dn", "id",
+        "os", "cn", "ou",
+    }
+    words = []
+    for part in name.split("_"):
+        if part.lower() in acronyms:
+            words.append(part.upper())
+        else:
+            words.append(part.capitalize())
+    return " ".join(words)
+
+
+def _format_adcap_dict_soapy_style(d: dict) -> str:
+    """Render an MS-ADCAP primitive result as an aligned SOAPy-style
+    table: label column padded wide enough that even the longest label
+    keeps a space before its value, multi-value fields with one value
+    per line (subsequent lines indented), ``None`` / ``[]`` / ``""``
+    collapsed to ``None``. Fields are shown in alphabetical order of
+    their display label — matches SOAPy's upstream style.
+    """
+    items = sorted(d.items(), key=lambda kv: _snake_to_label(kv[0]))
+    # Auto-size: ensure at least one space between the ":" and the value
+    # even for long labels like "Foreign Security Principals Container:".
+    max_label = max(
+        (len(_snake_to_label(k)) + 1 for k, _ in items), default=0,
+    )
+    col = max(_ADCAP_LABEL_COL, max_label + 1)
+    pad = " " * col
+    lines: list[str] = []
+    for key, value in items:
+        label = _snake_to_label(key) + ":"
+        head = f"{label:<{col}}"
+        if isinstance(value, list):
+            if not value:
+                lines.append(f"{head}None")
+            else:
+                lines.append(f"{head}{value[0]}")
+                for extra in value[1:]:
+                    lines.append(f"{pad}{extra}")
+        elif value is None or value == "":
+            lines.append(f"{head}None")
+        else:
+            lines.append(f"{head}{value}")
+    return "\n".join(lines)
+
+
 def run_cli():
     print(r"""
   ____   ___    _    ____        
@@ -794,6 +850,41 @@ github.com/jlevere
         dest="get_forest",
         action="store_true",
         help="Retrieve forest topology via MS-ADCAP TopologyManagement/GetADForest",
+    )
+    adcap_grp.add_argument(
+        "--get-domain",
+        dest="get_domain",
+        action="store_true",
+        help="Retrieve domain object via MS-ADCAP TopologyManagement/GetADDomain",
+    )
+    adcap_grp.add_argument(
+        "--get-dc",
+        dest="get_dc",
+        action="store_true",
+        help="Retrieve DC object via MS-ADCAP TopologyManagement/GetADDomainController (requires --ntds-settings-dn)",
+    )
+    adcap_grp.add_argument(
+        "--get-version",
+        dest="get_version",
+        action="store_true",
+        help="Fingerprint the ADWS service version via MS-ADCAP TopologyManagement/GetVersion",
+    )
+    adcap_grp.add_argument(
+        "--identity",
+        dest="adcap_identity",
+        action="store",
+        metavar="DN",
+        default=None,
+        help="Optional identity (DN / NetBIOS / DNS) for --get-domain",
+    )
+    adcap_grp.add_argument(
+        "--ntds-settings-dn",
+        dest="ntds_settings_dn",
+        action="append",
+        metavar="DN",
+        default=[],
+        help="NTDS Settings DN for --get-dc (repeatable, required). Example: "
+             "CN=NTDS Settings,CN=DC-01,CN=Servers,CN=Site1,CN=Sites,CN=Configuration,DC=example,DC=local",
     )
 
     wstep_grp = parser.add_argument_group('WS-Trust enrollment (MS-XCEP + MS-WSTEP)')
@@ -1250,18 +1341,49 @@ github.com/jlevere
                 auth=auth,
             )
             forest = adcap.get_ad_forest(cap_client)
-            col_width = 28
-            for key, val in forest.items():
-                label = key.replace("_", " ").title()
-                if isinstance(val, list):
-                    if val:
-                        print(f"{label + ':':<{col_width}} {val[0]}")
-                        for item in val[1:]:
-                            print(f"{'':<{col_width}} {item}")
-                    else:
-                        print(f"{label + ':':<{col_width}} (none)")
-                else:
-                    print(f"{label + ':':<{col_width}} {val}")
+            print(_format_adcap_dict_soapy_style(forest))
+
+        # ADCAP GetADDomain
+        elif options.get_domain:
+            cap_client = ADWSConnect.topology_cap_client(
+                ip=remoteName, domain=domain, username=username, auth=auth,
+            )
+            dom = adcap.get_ad_domain(cap_client, identity=options.adcap_identity)
+            print(_format_adcap_dict_soapy_style(dom))
+
+        # ADCAP GetADDomainController
+        elif options.get_dc:
+            if not options.ntds_settings_dn:
+                logging.critical(
+                    "--get-dc requires at least one --ntds-settings-dn <DN>. "
+                    "Discover them with: ldapsearch -b CN=Sites,CN=Configuration,<rootDN> "
+                    "'(objectClass=nTDSDSA)' dn"
+                )
+                raise SystemExit(1)
+            cap_client = ADWSConnect.topology_cap_client(
+                ip=remoteName, domain=domain, username=username, auth=auth,
+            )
+            dc = adcap.get_ad_domain_controller(
+                cap_client, options.ntds_settings_dn,
+            )
+            print(_format_adcap_dict_soapy_style(dc))
+
+        # ADCAP GetVersion — one short line, no table needed. The server
+        # ships a version_string that already includes "Active Directory
+        # Web Services vX.Y"; print it as-is when present, otherwise fall
+        # back to the parsed major.minor.
+        elif options.get_version:
+            cap_client = ADWSConnect.topology_cap_client(
+                ip=remoteName, domain=domain, username=username, auth=auth,
+            )
+            ver = adcap.get_version(cap_client)
+            if ver["version_string"]:
+                print(ver["version_string"])
+            else:
+                print(
+                    f"Active Directory Web Services "
+                    f"v{ver['version_major']}.{ver['version_minor']}"
+                )
 
         # WS-Trust certificate enrollment (MS-XCEP + MS-WSTEP).
         # Reuse the creds already extracted from the connection string
