@@ -717,5 +717,97 @@ def _sid_b64(canonical: str) -> str:
     return b64encode(s.getData()).decode()
 
 
+class SnakeToPascalTests(unittest.TestCase):
+    """Unit tests for the key-case converter used by the Format-List helper.
+    The ``sid`` acronym stays uppercase; ``guid`` does NOT, so ``object_guid``
+    stays ``ObjectGuid`` and matches Soaphound.py's wire-level PascalCase.
+    """
+
+    def test_distinguished_name(self):
+        from src.soa import _snake_to_pascal
+        self.assertEqual(_snake_to_pascal("distinguished_name"), "DistinguishedName")
+
+    def test_object_guid_keeps_mixed_case(self):
+        from src.soa import _snake_to_pascal
+        self.assertEqual(_snake_to_pascal("object_guid"), "ObjectGuid")
+
+    def test_sid_is_all_caps(self):
+        from src.soa import _snake_to_pascal
+        self.assertEqual(_snake_to_pascal("sid"), "SID")
+
+    def test_sam_account_name(self):
+        from src.soa import _snake_to_pascal
+        self.assertEqual(_snake_to_pascal("sam_account_name"), "SamAccountName")
+
+
+class FormatPrincipalListPowershellTests(unittest.TestCase):
+    """Verify the PowerShell-style Format-List renderer used by the 3
+    AccountManagement dispatch paths in src/soa.py. Keys are PascalCase on
+    output so SOAPy's render matches Soaphound.py byte-for-byte.
+    """
+
+    def test_two_principals_block_alignment_and_list_rendering(self):
+        from src.soa import _format_principal_list_powershell
+        principals = [
+            {
+                "distinguished_name": "CN=Administrator,CN=Users,DC=example,DC=local",
+                "name": "Administrator",
+                "object_class": "user",
+                "object_types": ["top", "person", "organizationalPerson", "user"],
+                "sid": "S-1-5-21-1-2-3-500",
+            },
+            {
+                "distinguished_name": "CN=Domain Users,CN=Users,DC=example,DC=local",
+                "name": "Domain Users",
+                "object_class": "group",
+                "object_types": ["top", "group"],
+                "sid": "S-1-5-21-1-2-3-513",
+            },
+        ]
+        out = _format_principal_list_powershell(principals)
+        # Blocks separated by exactly one blank line.
+        self.assertIn("\n\n", out)
+        blocks = out.split("\n\n")
+        self.assertEqual(len(blocks), 2)
+        # Keys appear in PascalCase, snake_case must NOT leak through.
+        self.assertNotIn("distinguished_name", out)
+        self.assertNotIn("object_types", out)
+        # Colon aligned on longest PascalCase key (DistinguishedName = 17).
+        self.assertIn(
+            "DistinguishedName : CN=Administrator,CN=Users,DC=example,DC=local",
+            blocks[0],
+        )
+        self.assertIn("Name              : Administrator", blocks[0])
+        # Lists rendered as PowerShell-style braced sequences.
+        self.assertIn(
+            "ObjectTypes       : {top, person, organizationalPerson, user}",
+            blocks[0],
+        )
+        self.assertIn("ObjectTypes       : {top, group}", blocks[1])
+        self.assertFalse(out.endswith("\n"))
+
+    def test_well_known_none_values_render_as_empty_string(self):
+        from src.soa import _format_principal_list_powershell
+        principals = [
+            {
+                "distinguished_name": None,
+                "name": "Everyone",
+                "object_class": None,
+                "object_types": [],
+                "sid": "S-1-1-0",
+            },
+        ]
+        out = _format_principal_list_powershell(principals)
+        # None → empty string on the right of the colon, never the literal "None".
+        self.assertIn("DistinguishedName : \n", out + "\n")
+        self.assertIn("ObjectClass       : \n", out + "\n")
+        self.assertNotIn(": None", out)
+        # Empty list renders as "{}".
+        self.assertIn("ObjectTypes       : {}", out)
+        # Populated string field still renders plainly.
+        self.assertIn("Name              : Everyone", out)
+        self.assertIn("SID               : S-1-1-0", out)
+
+
 if __name__ == "__main__":
     unittest.main()

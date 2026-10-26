@@ -685,6 +685,59 @@ def _format_adcap_dict_soapy_style(d: dict) -> str:
     return "\n".join(lines)
 
 
+_PASCAL_ACRONYMS = {"sid"}
+
+
+def _snake_to_pascal(name: str) -> str:
+    """snake_case → PascalCase, with wire-level acronyms kept uppercase.
+
+    Matches the PascalCase keys the Soaphound.py Phase 2 parsers emit
+    directly from the server wire (``DistinguishedName``, ``ObjectGuid``,
+    ``SID``). Only ``sid`` is in the acronym set — ``guid`` stays
+    ``Guid`` so ``object_guid`` → ``ObjectGuid`` (not ``ObjectGUID``) and
+    byte-matches Soaphound.py.
+    """
+    parts = name.split("_")
+    return "".join(
+        p.upper() if p.lower() in _PASCAL_ACRONYMS else p.capitalize()
+        for p in parts
+    )
+
+
+def _format_principal_list_powershell(principals: list[dict]) -> str:
+    """Render a list of principal dicts as a PowerShell Format-List output,
+    matching what RSAT's Get-AD* cmdlets print natively.
+
+    Each principal is a block of ``Key : Value`` lines, colon-aligned to the
+    longest key + 1 space. Keys are converted snake_case → PascalCase so the
+    output byte-matches Soaphound.py (whose parsers emit PascalCase directly).
+    Lists render as ``{a, b, c}`` (``{}`` when empty). ``None`` renders as an
+    empty string on the right of the colon. Blocks are separated by one
+    blank line.
+    """
+    if not principals:
+        return ""
+
+    out_blocks: list[str] = []
+    for principal in principals:
+        if not principal:
+            continue
+        pascal_items = sorted([(_snake_to_pascal(k), v) for k, v in principal.items()], key=lambda kv: kv[0])
+        col = max(len(k) for k, _ in pascal_items)
+        block_lines: list[str] = []
+        for key, value in pascal_items:
+            if isinstance(value, list):
+                rendered = "{" + ", ".join(str(v) for v in value) + "}" if value else "{}"
+            elif value is None:
+                rendered = ""
+            else:
+                rendered = str(value)
+            block_lines.append(f"{key:<{col}} : {rendered}")
+        out_blocks.append("\n".join(block_lines))
+
+    return "\n\n".join(out_blocks)
+
+
 def run_cli():
     print(r"""
   ____   ___    _    ____        
@@ -1449,7 +1502,10 @@ github.com/jlevere
                 items = adcap.get_ad_principal_authorization_group(
                     cap_client, identity, partition_dn, format_offered,
                 )
-            print(_json.dumps(items, indent=2))
+            if isinstance(items, dict) and "error" in items:
+                print(_json.dumps(items, indent=2))
+            else:
+                print(_format_principal_list_powershell(items))
 
         # ADCAP GetVersion — one short line, no table needed. The server
         # ships a version_string that already includes "Active Directory
